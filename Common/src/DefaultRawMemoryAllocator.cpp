@@ -31,11 +31,6 @@
 
 #include <stdlib.h>
 
-#if defined(_DEBUG) && defined(_MSC_VER)
-#    include <crtdbg.h>
-#    define USE_CRT_MALLOC_DBG 1
-#endif
-
 #if PLATFORM_ANDROID && __ANDROID_API__ < 28
 #    define USE_ALIGNED_MALLOC_FALLBACK 1
 #endif

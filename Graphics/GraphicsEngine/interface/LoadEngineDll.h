@@ -60,7 +60,7 @@ inline FARPROC LoadEngineDll(const char* EngineName, const char* GetFactoryFuncN
     const char* Arch = "_32";
 #endif
 
-#if defined(DILIGENT_DEBUG) || defined(_DEBUG)
+#if defined(DILIGENT_DEBUG)
     const char* Conf = "d";
 #else
     const char* Conf = "r";
