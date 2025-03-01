@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -74,6 +74,10 @@ RenderDeviceD3D11Impl::RenderDeviceD3D11Impl(IReferenceCounters*          pRefCo
         EngineCI,
         AdapterInfo
     },
+    m_Properties
+    {
+        EngineCI.D3D11ValidationFlags,
+    },
     m_pd3d11Device{pd3d11Device}
 // clang-format on
 {
@@ -135,13 +139,14 @@ RenderDeviceD3D11Impl::~RenderDeviceD3D11Impl()
 
 void RenderDeviceD3D11Impl::TestTextureFormat(TEXTURE_FORMAT TexFormat)
 {
-    auto& TexFormatInfo = m_TextureFormatsInfo[TexFormat];
+    TextureFormatInfoExt& TexFormatInfo = m_TextureFormatsInfo[TexFormat];
     VERIFY(TexFormatInfo.Supported, "Texture format is not supported");
 
-    auto DXGIFormat = TexFormatToDXGI_Format(TexFormat);
+    DXGI_FORMAT DXGIFormat = TexFormatToDXGI_Format(TexFormat);
 
     UINT FormatSupport = 0;
-    auto hr            = m_pd3d11Device->CheckFormatSupport(DXGIFormat, &FormatSupport);
+
+    HRESULT hr = m_pd3d11Device->CheckFormatSupport(DXGIFormat, &FormatSupport);
     if (FAILED(hr))
     {
         LOG_ERROR_MESSAGE("CheckFormatSupport() failed for format ", DXGIFormat);
@@ -384,11 +389,32 @@ void RenderDeviceD3D11Impl::CreatePipelineStateCache(const PipelineStateCacheCre
     *ppPSOCache = nullptr;
 }
 
+void RenderDeviceD3D11Impl::CreateDeferredContext(IDeviceContext** ppDeferredContext)
+{
+    CComPtr<ID3D11DeviceContext> pd3d11DeferredCtx;
+
+    HRESULT hr = m_pd3d11Device->CreateDeferredContext(0, &pd3d11DeferredCtx);
+    if (FAILED(hr) || !pd3d11DeferredCtx)
+    {
+        LOG_ERROR_MESSAGE("Failed to create D3D11 deferred context");
+        return;
+    }
+
+    CComQIPtr<ID3D11DeviceContext1> pd3d11DeferredCtx1{pd3d11DeferredCtx};
+    if (!pd3d11DeferredCtx1)
+    {
+        LOG_ERROR_MESSAGE("Failed to get ID3D11DeviceContext1 interface from device context");
+        return;
+    }
+
+    CreateDeferredContextImpl(ppDeferredContext, pd3d11DeferredCtx1);
+}
+
 void RenderDeviceD3D11Impl::IdleGPU()
 {
     VERIFY_EXPR(m_wpImmediateContexts.size() == 1);
 
-    if (auto pImmediateCtx = m_wpImmediateContexts[0].Lock())
+    if (RefCntAutoPtr<DeviceContextD3D11Impl> pImmediateCtx = m_wpImmediateContexts[0].Lock())
     {
         pImmediateCtx->WaitForIdle();
     }

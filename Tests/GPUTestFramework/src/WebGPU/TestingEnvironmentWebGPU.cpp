@@ -1,5 +1,5 @@
 /*
- *  Copyright 2023-2024 Diligent Graphics LLC
+ *  Copyright 2023-2025 Diligent Graphics LLC
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@
 #include "DeviceContextWebGPU.h"
 #include "EngineFactoryWebGPU.h"
 
-#if !PLATFORM_EMSCRIPTEN
+#if !PLATFORM_WEB
 #    include <dawn/dawn_proc.h>
 #else
 #    include <emscripten.h>
@@ -54,7 +54,7 @@ TestingEnvironmentWebGPU::TestingEnvironmentWebGPU(const CreateInfo&    CI,
     RefCntAutoPtr<IDeviceContextWebGPU> pDeviceContextWebGPU{GetDeviceContext(), IID_DeviceContextWebGPU};
     RefCntAutoPtr<IEngineFactoryWebGPU> pEngineFactory{m_pDevice->GetEngineFactory(), IID_EngineFactoryWebGPU};
 
-#if !PLATFORM_EMSCRIPTEN
+#if !PLATFORM_WEB
     dawnProcSetProcs(static_cast<const DawnProcTable*>(pEngineFactory->GetProcessTable()));
 #endif
     m_wgpuDevice = pRenderDeviceWebGPU->GetWebGPUDevice();
@@ -77,9 +77,9 @@ WGPUCommandEncoder TestingEnvironmentWebGPU::CreateCommandEncoder()
 
 WGPUShaderModule TestingEnvironmentWebGPU::CreateShaderModule(const std::string& ShaderSource)
 {
-    WGPUShaderModuleWGSLDescriptor wgpuShaderCodeDesc{};
-    wgpuShaderCodeDesc.chain.sType = WGPUSType_ShaderModuleWGSLDescriptor;
-    wgpuShaderCodeDesc.code        = ShaderSource.c_str();
+    WGPUShaderSourceWGSL wgpuShaderCodeDesc{};
+    wgpuShaderCodeDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
+    wgpuShaderCodeDesc.code        = GetWGPUStringView(ShaderSource);
 
     WGPUShaderModuleDescriptor wgpuShaderModuleDesc{};
     wgpuShaderModuleDesc.nextInChain  = reinterpret_cast<WGPUChainedStruct*>(&wgpuShaderCodeDesc);
@@ -98,6 +98,8 @@ void TestingEnvironmentWebGPU::SubmitCommandEncoder(WGPUCommandEncoder wgpuCmdEn
     VERIFY_EXPR(wgpuCmdQueue != nullptr);
 
     wgpuQueueSubmit(wgpuCmdQueue, 1, &wgpuCmdBuffer);
+    wgpuCommandBufferRelease(wgpuCmdBuffer);
+
     if (WaitForIdle)
     {
         bool IsWorkDone       = false;
@@ -108,16 +110,17 @@ void TestingEnvironmentWebGPU::SubmitCommandEncoder(WGPUCommandEncoder wgpuCmdEn
                 DEV_ERROR("Failed wgpuQueueOnSubmittedWorkDone: ", Status);
         };
 
-        WGPUQueue wgpuQueue = wgpuDeviceGetQueue(m_wgpuDevice);
-        wgpuQueueOnSubmittedWorkDone(wgpuQueue, WorkDoneCallback, &IsWorkDone);
+        wgpuQueueOnSubmittedWorkDone(wgpuCmdQueue, WorkDoneCallback, &IsWorkDone);
 
         while (!IsWorkDone)
         {
-#if !PLATFORM_EMSCRIPTEN
+#if !PLATFORM_WEB
             wgpuDeviceTick(m_wgpuDevice);
 #endif
         }
     }
+
+    wgpuQueueRelease(wgpuCmdQueue);
 }
 
 GPUTestingEnvironment* CreateTestingEnvironmentWebGPU(const GPUTestingEnvironment::CreateInfo& CI,

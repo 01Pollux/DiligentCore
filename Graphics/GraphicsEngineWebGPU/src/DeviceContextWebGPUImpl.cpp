@@ -1,5 +1,5 @@
 /*
- *  Copyright 2023-2024 Diligent Graphics LLC
+ *  Copyright 2023-2025 Diligent Graphics LLC
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -47,10 +47,9 @@
 namespace Diligent
 {
 
-DeviceContextWebGPUImpl::DeviceContextWebGPUImpl(IReferenceCounters*           pRefCounters,
-                                                 RenderDeviceWebGPUImpl*       pDevice,
-                                                 const EngineWebGPUCreateInfo& EngineCI,
-                                                 const DeviceContextDesc&      Desc) :
+DeviceContextWebGPUImpl::DeviceContextWebGPUImpl(IReferenceCounters*      pRefCounters,
+                                                 RenderDeviceWebGPUImpl*  pDevice,
+                                                 const DeviceContextDesc& Desc) :
     // clang-format off
     TDeviceContextBase
     {
@@ -64,6 +63,8 @@ DeviceContextWebGPUImpl::DeviceContextWebGPUImpl(IReferenceCounters*           p
     FenceDesc InternalFenceDesc;
     InternalFenceDesc.Name = "Device context internal fence";
     pDevice->CreateFence(InternalFenceDesc, &m_pFence);
+
+    m_MappedBuffers.reserve(16);
 }
 
 void DeviceContextWebGPUImpl::Begin(Uint32 ImmediateContextId)
@@ -74,15 +75,10 @@ void DeviceContextWebGPUImpl::Begin(Uint32 ImmediateContextId)
 
 void DeviceContextWebGPUImpl::SetPipelineState(IPipelineState* pPipelineState)
 {
-    RefCntAutoPtr<PipelineStateWebGPUImpl> pPipelineStateWebGPU{pPipelineState, PipelineStateWebGPUImpl::IID_InternalImpl};
-    VERIFY(pPipelineState == nullptr || pPipelineStateWebGPU != nullptr, "Unknown pipeline state object implementation");
-    if (PipelineStateWebGPUImpl::IsSameObject(m_pPipelineState, pPipelineStateWebGPU))
+    if (!TDeviceContextBase::SetPipelineState(pPipelineState, PipelineStateWebGPUImpl::IID_InternalImpl))
         return;
 
-    TDeviceContextBase::SetPipelineState(std::move(pPipelineStateWebGPU), 0 /*Dummy*/);
-
     m_EncoderState.Invalidate(WebGPUEncoderState::CMD_ENCODER_STATE_PIPELINE_STATE);
-
 
     Uint32 DvpCompatibleSRBCount = 0;
     PrepareCommittedResources(m_BindInfo, DvpCompatibleSRBCount);
@@ -249,7 +245,7 @@ void DeviceContextWebGPUImpl::CommitBindGroups(CmdEncoderType CmdEncoder, Uint32
             bool DynamicOffsetsChanged = false;
             if (!BindGroup.DynamicBufferOffsets.empty())
             {
-                DynamicOffsetsChanged = ResourceCache->GetDynamicBufferOffsets(GetContextId(), BindGroup.DynamicBufferOffsets, BindGroupCacheIndex);
+                DynamicOffsetsChanged = ResourceCache->GetDynamicBufferOffsets(this, BindGroup.DynamicBufferOffsets, BindGroupCacheIndex);
             }
             ++BindGroupCacheIndex;
 
@@ -456,7 +452,7 @@ void DeviceContextWebGPUImpl::DrawIndirect(const DrawIndirectAttribs& Attribs)
 #ifdef DILIGENT_DEVELOPMENT
     DvpValidateCommittedShaderResources();
     if (Attribs.pAttribsBuffer->GetDesc().Usage == USAGE_DYNAMIC)
-        ClassPtrCast<BufferWebGPUImpl>(Attribs.pAttribsBuffer)->DvpVerifyDynamicAllocation(this);
+        DvpVerifyDynamicAllocation(ClassPtrCast<BufferWebGPUImpl>(Attribs.pAttribsBuffer));
 #endif
 
     WGPURenderPassEncoder wgpuRenderCmdEncoder = PrepareForDraw(Attribs.Flags);
@@ -477,7 +473,7 @@ void DeviceContextWebGPUImpl::DrawIndexedIndirect(const DrawIndexedIndirectAttri
 #ifdef DILIGENT_DEVELOPMENT
     DvpValidateCommittedShaderResources();
     if (Attribs.pAttribsBuffer->GetDesc().Usage == USAGE_DYNAMIC)
-        ClassPtrCast<BufferWebGPUImpl>(Attribs.pAttribsBuffer)->DvpVerifyDynamicAllocation(this);
+        DvpVerifyDynamicAllocation(ClassPtrCast<BufferWebGPUImpl>(Attribs.pAttribsBuffer));
 #endif
 
     WGPURenderPassEncoder wgpuRenderCmdEncoder = PrepareForIndexedDraw(Attribs.Flags, Attribs.IndexType);
@@ -523,7 +519,7 @@ void DeviceContextWebGPUImpl::DispatchComputeIndirect(const DispatchComputeIndir
 #ifdef DILIGENT_DEVELOPMENT
     DvpValidateCommittedShaderResources();
     if (Attribs.pAttribsBuffer->GetDesc().Usage == USAGE_DYNAMIC)
-        ClassPtrCast<BufferWebGPUImpl>(Attribs.pAttribsBuffer)->DvpVerifyDynamicAllocation(this);
+        DvpVerifyDynamicAllocation(ClassPtrCast<BufferWebGPUImpl>(Attribs.pAttribsBuffer));
 #endif
 
     WGPUComputePassEncoder wgpuComputeCmdEncoder = PrepareForDispatchCompute();
@@ -605,7 +601,7 @@ void DeviceContextWebGPUImpl::UpdateBuffer(IBuffer*                       pBuffe
     const BufferDesc&       BuffDesc      = pBufferWebGPU->GetDesc();
     if (BuffDesc.Usage == USAGE_DEFAULT)
     {
-        const auto UploadAlloc = AllocateUploadMemory(StaticCast<size_t>(Size));
+        const UploadMemoryManagerWebGPU::Allocation UploadAlloc = AllocateUploadMemory(StaticCast<size_t>(Size));
         if (!UploadAlloc)
         {
             LOG_ERROR("Failed to allocate upload memory for buffer update");
@@ -649,8 +645,8 @@ void DeviceContextWebGPUImpl::CopyBuffer(IBuffer*                       pSrcBuff
         if (wgpuSrcBuffer == nullptr)
         {
             VERIFY_EXPR(SrcDesc.Usage == USAGE_DYNAMIC);
-            const auto& DynAlloc = pSrcBufferWebGPU->GetDynamicAllocation(GetContextId());
-            wgpuSrcBuffer        = DynAlloc.wgpuBuffer;
+            const DynamicMemoryManagerWebGPU::Allocation& DynAlloc = GetDynamicBufferAllocation(pSrcBufferWebGPU);
+            wgpuSrcBuffer                                          = DynAlloc.wgpuBuffer;
             SrcOffset += DynAlloc.Offset;
         }
 
@@ -685,8 +681,8 @@ void DeviceContextWebGPUImpl::CopyBuffer(IBuffer*                       pSrcBuff
         if (wgpuSrcBuffer == nullptr)
         {
             VERIFY_EXPR(SrcDesc.Usage == USAGE_DYNAMIC);
-            const auto& DynAlloc = pSrcBufferWebGPU->GetDynamicAllocation(GetContextId());
-            wgpuSrcBuffer        = DynAlloc.wgpuBuffer;
+            const DynamicMemoryManagerWebGPU::Allocation& DynAlloc = GetDynamicBufferAllocation(pSrcBufferWebGPU);
+            wgpuSrcBuffer                                          = DynAlloc.wgpuBuffer;
             SrcOffset += DynAlloc.Offset;
         }
 
@@ -729,17 +725,24 @@ void DeviceContextWebGPUImpl::MapBuffer(IBuffer*  pBuffer,
         }
         else if (BuffDesc.Usage == USAGE_DYNAMIC)
         {
-            const auto& DynAllocation = pBufferWebGPU->GetDynamicAllocation(GetContextId());
+            const Uint32 DynamicBufferId = pBufferWebGPU->GetDynamicBufferId();
+            VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", BuffDesc.Name, "' does not have dynamic buffer ID");
+            if (m_MappedBuffers.size() <= DynamicBufferId)
+                m_MappedBuffers.resize(DynamicBufferId + 1);
+            DynamicMemoryManagerWebGPU::Allocation& DynAllocation = m_MappedBuffers[DynamicBufferId].Allocation;
+#ifdef DILIGENT_DEVELOPMENT
+            m_MappedBuffers[DynamicBufferId].DvpBufferUID = pBufferWebGPU->GetUniqueID();
+#endif
+
             if ((MapFlags & MAP_FLAG_DISCARD) != 0 || !DynAllocation)
             {
-                auto Allocation = AllocateDynamicMemory(StaticCast<size_t>(BuffDesc.Size), pBufferWebGPU->GetAlignment());
-                if (!Allocation)
+                DynAllocation = AllocateDynamicMemory(StaticCast<size_t>(BuffDesc.Size), pBufferWebGPU->GetAlignment());
+                if (!DynAllocation)
                 {
                     LOG_ERROR("Failed to allocate dynamic memory for buffer mapping. Try increasing the size of the dynamic heap in engine EngineWebGPUCreateInfo");
                     return;
                 }
-                pMappedData = Allocation.pData;
-                pBufferWebGPU->SetDynamicAllocation(GetContextId(), std::move(Allocation));
+                pMappedData = DynAllocation.pData;
             }
             else
             {
@@ -796,7 +799,7 @@ void DeviceContextWebGPUImpl::UnmapBuffer(IBuffer* pBuffer, MAP_TYPE MapType)
                               "copying the data from shared memory to private storage. This can only be "
                               "done by blit encoder outside of render pass.");
 
-                const auto& DynAllocation = pBufferWebGPU->GetDynamicAllocation(GetContextId());
+                const DynamicMemoryManagerWebGPU::Allocation& DynAllocation = GetDynamicBufferAllocation(pBufferWebGPU);
 
                 EndCommandEncoders();
                 wgpuCommandEncoderCopyBufferToBuffer(GetCommandEncoder(), DynAllocation.wgpuBuffer, DynAllocation.Offset, wgpuBuffer, 0, BuffDesc.Size);
@@ -808,6 +811,72 @@ void DeviceContextWebGPUImpl::UnmapBuffer(IBuffer* pBuffer, MAP_TYPE MapType)
         }
     }
 }
+
+#ifdef DILIGENT_DEVELOPMENT
+void DeviceContextWebGPUImpl::DvpVerifyDynamicAllocation(const BufferWebGPUImpl* pBuffer) const
+{
+    VERIFY_EXPR(pBuffer != nullptr);
+
+    if (pBuffer->m_wgpuBuffer != nullptr)
+        return;
+
+    const BufferDesc& BuffDesc = pBuffer->GetDesc();
+    VERIFY_EXPR(BuffDesc.Usage == USAGE_DYNAMIC);
+
+    const Uint32 DynamicBufferId = pBuffer->GetDynamicBufferId();
+    VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", pBuffer->GetDesc().Name, "' does not have dynamic buffer ID");
+
+    if (DynamicBufferId >= m_MappedBuffers.size())
+    {
+        DEV_ERROR("Dynamic buffer '", BuffDesc.Name, "' has not been mapped. Note: memory for dynamic buffers is allocated when a buffer is mapped.");
+        return;
+    }
+
+    const MappedBuffer& MappedBuff = m_MappedBuffers[DynamicBufferId];
+    DEV_CHECK_ERR(MappedBuff.Allocation, "Dynamic buffer '", BuffDesc.Name, "' has not been mapped before its first use. Context Id: ", GetContextId(),
+                  ". Note: memory for dynamic buffers is allocated when a buffer is mapped.");
+
+    DEV_CHECK_ERR(MappedBuff.Allocation.dvpFrameNumber == GetFrameNumber(), "Dynamic allocation of dynamic buffer '", BuffDesc.Name, "' in frame ", GetFrameNumber(),
+                  " is out-of-date. Note: contents of all dynamic resources is discarded at the end of every frame. A buffer must be mapped before its first use in any frame.");
+
+    DEV_CHECK_ERR(MappedBuff.DvpBufferUID == pBuffer->GetUniqueID(), "Dynamic buffer ID mismatch. Buffer '", BuffDesc.Name, "' has ID ", pBuffer->GetUniqueID(), " but the ID of the mapped buffer is ",
+                  MappedBuff.DvpBufferUID, ". This indicates that dynamic space has been reassigned to a different buffer, which has not been mapped.");
+}
+#endif
+
+const DynamicMemoryManagerWebGPU::Allocation& DeviceContextWebGPUImpl::GetDynamicBufferAllocation(const BufferWebGPUImpl* pBuffer) const
+{
+    VERIFY_EXPR(pBuffer->GetDesc().Usage == USAGE_DYNAMIC);
+
+    const Uint32 DynamicBufferId = pBuffer->GetDynamicBufferId();
+    VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", pBuffer->GetDesc().Name, "' does not have dynamic buffer ID");
+    DEV_CHECK_ERR(DynamicBufferId < m_MappedBuffers.size(), "Buffer '", pBuffer->GetDesc().Name, "' has not been mapped in this context");
+
+    static DynamicMemoryManagerWebGPU::Allocation NullAllocation;
+    return DynamicBufferId < m_MappedBuffers.size() ? m_MappedBuffers[DynamicBufferId].Allocation : NullAllocation;
+}
+
+Uint64 DeviceContextWebGPUImpl::GetDynamicBufferOffset(const BufferWebGPUImpl* pBuffer, bool VerifyAllocation) const
+{
+    VERIFY_EXPR(pBuffer != nullptr);
+
+    if (pBuffer->m_wgpuBuffer != nullptr)
+        return 0;
+
+#ifdef DILIGENT_DEVELOPMENT
+    if (VerifyAllocation)
+    {
+        DvpVerifyDynamicAllocation(pBuffer);
+    }
+#endif
+
+    const Uint32 DynamicBufferId = pBuffer->GetDynamicBufferId();
+    VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", pBuffer->GetDesc().Name, "' does not have dynamic buffer ID");
+    return DynamicBufferId < m_MappedBuffers.size() ?
+        m_MappedBuffers[DynamicBufferId].Allocation.Offset :
+        0;
+}
+
 
 void DeviceContextWebGPUImpl::UpdateTexture(ITexture*                      pTexture,
                                             Uint32                         MipLevel,
@@ -879,7 +948,7 @@ void DeviceContextWebGPUImpl::UpdateTexture(ITexture*                      pText
         const TextureDesc&            TexDesc  = pTextureWebGPU->GetDesc();
         const BufferToTextureCopyInfo CopyInfo = GetBufferToTextureCopyInfo(TexDesc.Format, DstBox, TextureWebGPUImpl::ImageCopyBufferRowAlignment);
 
-        const auto UploadAlloc = AllocateUploadMemory(StaticCast<size_t>(CopyInfo.MemorySize));
+        const UploadMemoryManagerWebGPU::Allocation UploadAlloc = AllocateUploadMemory(StaticCast<size_t>(CopyInfo.MemorySize));
         if (!UploadAlloc)
         {
             LOG_ERROR("Failed to allocate upload memory for texture update");
@@ -890,8 +959,8 @@ void DeviceContextWebGPUImpl::UpdateTexture(ITexture*                      pText
         {
             for (Uint32 RawIdx = 0; RawIdx < CopyInfo.RowCount; ++RawIdx)
             {
-                const auto SrcOffset = RawIdx * SubresData.Stride + LayerIdx * SubresData.DepthStride;
-                const auto DstOffset = RawIdx * CopyInfo.RowStride + LayerIdx * CopyInfo.DepthStride;
+                const Uint64 SrcOffset = RawIdx * SubresData.Stride + LayerIdx * SubresData.DepthStride;
+                const Uint64 DstOffset = RawIdx * CopyInfo.RowStride + LayerIdx * CopyInfo.DepthStride;
                 memcpy(UploadAlloc.pData + DstOffset, static_cast<const uint8_t*>(SubresData.pData) + SrcOffset, StaticCast<size_t>(CopyInfo.RowSize));
             }
         }
@@ -1137,8 +1206,8 @@ void DeviceContextWebGPUImpl::MapTextureSubresource(ITexture*                 pT
         if ((MapFlags & (MAP_FLAG_DISCARD | MAP_FLAG_NO_OVERWRITE)) != 0)
             LOG_INFO_MESSAGE_ONCE("Mapping textures with flags MAP_FLAG_DISCARD or MAP_FLAG_NO_OVERWRITE has no effect in WebGPU backend");
 
-        const auto CopyInfo    = GetBufferToTextureCopyInfo(TexDesc.Format, *pMapRegion, TextureWebGPUImpl::ImageCopyBufferRowAlignment);
-        const auto UploadAlloc = AllocateUploadMemory(StaticCast<size_t>(CopyInfo.MemorySize), TextureWebGPUImpl::ImageCopyBufferRowAlignment);
+        const BufferToTextureCopyInfo               CopyInfo    = GetBufferToTextureCopyInfo(TexDesc.Format, *pMapRegion, TextureWebGPUImpl::ImageCopyBufferRowAlignment);
+        const UploadMemoryManagerWebGPU::Allocation UploadAlloc = AllocateUploadMemory(StaticCast<size_t>(CopyInfo.MemorySize), TextureWebGPUImpl::ImageCopyBufferRowAlignment);
         if (!UploadAlloc)
         {
             LOG_ERROR("Failed to allocate upload memory for texture mapping");
@@ -1205,8 +1274,8 @@ void DeviceContextWebGPUImpl::UnmapTextureSubresource(ITexture* pTexture, Uint32
         {
             const TextureFormatAttribs& FmtAttribs = GetTextureFormatAttribs(TexDesc.Format);
 
-            const auto& Allocation = UploadSpaceIt->second.Allocation;
-            const auto& CopyInfo   = UploadSpaceIt->second.CopyInfo;
+            const UploadMemoryManagerWebGPU::Allocation& Allocation = UploadSpaceIt->second.Allocation;
+            const BufferToTextureCopyInfo&               CopyInfo   = UploadSpaceIt->second.CopyInfo;
 
             WGPUImageCopyBuffer wgpuImageCopySrc{};
             wgpuImageCopySrc.buffer              = Allocation.wgpuBuffer;
@@ -1275,7 +1344,7 @@ void DeviceContextWebGPUImpl::DeviceWaitForFence(IFence* pFence, Uint64 Value)
 void DeviceContextWebGPUImpl::WaitForIdle()
 {
     Flush();
-#if PLATFORM_EMSCRIPTEN
+#if PLATFORM_WEB
     LOG_ERROR_MESSAGE("IDeviceContext::WaitForIdle() is not supported on the Web. Use non-blocking synchronization methods.");
 #else
     m_pFence->Wait(m_FenceValue);
@@ -1513,17 +1582,17 @@ void DeviceContextWebGPUImpl::BeginDebugGroup(const Char* Name, const float* pCo
 
     if (m_wgpuRenderPassEncoder)
     {
-        wgpuRenderPassEncoderPushDebugGroup(GetRenderPassCommandEncoder(), Name);
+        wgpuRenderPassEncoderPushDebugGroup(GetRenderPassCommandEncoder(), GetWGPUStringView(Name));
         m_DebugGroupsStack.push_back(DEBUG_GROUP_TYPE_RENDER);
     }
     else if (m_wgpuComputePassEncoder)
     {
-        wgpuComputePassEncoderPushDebugGroup(GetComputePassCommandEncoder(), Name);
+        wgpuComputePassEncoderPushDebugGroup(GetComputePassCommandEncoder(), GetWGPUStringView(Name));
         m_DebugGroupsStack.push_back(DEBUG_GROUP_TYPE_COMPUTE);
     }
     else
     {
-        wgpuCommandEncoderPushDebugGroup(GetCommandEncoder(), Name);
+        wgpuCommandEncoderPushDebugGroup(GetCommandEncoder(), GetWGPUStringView(Name));
         m_DebugGroupsStack.push_back(DEBUG_GROUP_TYPE_OUTER);
     }
 }
@@ -1571,11 +1640,11 @@ void DeviceContextWebGPUImpl::InsertDebugLabel(const Char* Label, const float* p
     TDeviceContextBase::InsertDebugLabel(Label, pColor, 0);
 
     if (m_wgpuRenderPassEncoder)
-        wgpuRenderPassEncoderInsertDebugMarker(GetRenderPassCommandEncoder(), Label);
+        wgpuRenderPassEncoderInsertDebugMarker(GetRenderPassCommandEncoder(), GetWGPUStringView(Label));
     else if (m_wgpuComputePassEncoder)
-        wgpuComputePassEncoderInsertDebugMarker(GetComputePassCommandEncoder(), Label);
+        wgpuComputePassEncoderInsertDebugMarker(GetComputePassCommandEncoder(), GetWGPUStringView(Label));
     else
-        wgpuCommandEncoderInsertDebugMarker(GetCommandEncoder(), Label);
+        wgpuCommandEncoderInsertDebugMarker(GetCommandEncoder(), GetWGPUStringView(Label));
 }
 
 void DeviceContextWebGPUImpl::GenerateMips(ITextureView* pTexView)
@@ -1776,7 +1845,7 @@ void DeviceContextWebGPUImpl::CommitRenderTargets()
 
     if (m_pBoundDepthStencil)
     {
-        const auto& FormatAttribs = GetTextureFormatAttribs(m_pBoundDepthStencil->GetDesc().Format);
+        const TextureFormatAttribs& FormatAttribs = GetTextureFormatAttribs(m_pBoundDepthStencil->GetDesc().Format);
 
         wgpuRenderPassDepthStencilAttachment.view            = m_pBoundDepthStencil->GetWebGPUTextureView();
         wgpuRenderPassDepthStencilAttachment.depthLoadOp     = m_PendingClears.DepthPending() ? WGPULoadOp_Clear : WGPULoadOp_Load;
@@ -1818,11 +1887,11 @@ void DeviceContextWebGPUImpl::CommitSubpassRenderTargets()
 {
     VERIFY(!m_wgpuRenderPassEncoder && !m_wgpuComputePassEncoder, "Another command encoder is currently active");
     VERIFY_EXPR(m_pActiveRenderPass);
-    const auto& RPDesc = m_pActiveRenderPass->GetDesc();
+    const RenderPassDesc& RPDesc = m_pActiveRenderPass->GetDesc();
     VERIFY_EXPR(m_pBoundFramebuffer);
-    const auto& FBDesc = m_pBoundFramebuffer->GetDesc();
+    const FramebufferDesc& FBDesc = m_pBoundFramebuffer->GetDesc();
     VERIFY_EXPR(m_SubpassIndex < RPDesc.SubpassCount);
-    const auto& Subpass = RPDesc.pSubpasses[m_SubpassIndex];
+    const SubpassDesc& Subpass = RPDesc.pSubpasses[m_SubpassIndex];
     VERIFY(Subpass.RenderTargetAttachmentCount == m_NumBoundRenderTargets,
            "The number of currently bound render targets (", m_NumBoundRenderTargets,
            ") is not consistent with the number of render target attachments (", Subpass.RenderTargetAttachmentCount,
@@ -1831,13 +1900,13 @@ void DeviceContextWebGPUImpl::CommitSubpassRenderTargets()
     WGPURenderPassColorAttachment RenderPassColorAttachments[MAX_RENDER_TARGETS]{};
     for (Uint32 RTIndex = 0; RTIndex < m_NumBoundRenderTargets; ++RTIndex)
     {
-        const auto& RTAttachmentRef = Subpass.pRenderTargetAttachments[RTIndex];
+        const AttachmentReference& RTAttachmentRef = Subpass.pRenderTargetAttachments[RTIndex];
         if (RTAttachmentRef.AttachmentIndex != ATTACHMENT_UNUSED)
         {
             TextureViewWebGPUImpl* pRTV = m_pBoundRenderTargets[RTIndex];
             VERIFY(pRTV == FBDesc.ppAttachments[RTAttachmentRef.AttachmentIndex], "Render target bound in the device context at slot ", RTIndex, " is not consistent with the corresponding framebuffer attachment");
-            const auto  FirstLastUse     = m_pActiveRenderPass->GetAttachmentFirstLastUse(RTAttachmentRef.AttachmentIndex);
-            const auto& RTAttachmentDesc = RPDesc.pAttachments[RTAttachmentRef.AttachmentIndex];
+            const auto                      FirstLastUse     = m_pActiveRenderPass->GetAttachmentFirstLastUse(RTAttachmentRef.AttachmentIndex);
+            const RenderPassAttachmentDesc& RTAttachmentDesc = RPDesc.pAttachments[RTAttachmentRef.AttachmentIndex];
 
             RenderPassColorAttachments[RTIndex].view       = pRTV->GetWebGPUTextureView();
             RenderPassColorAttachments[RTIndex].loadOp     = FirstLastUse.first == m_SubpassIndex ? AttachmentLoadOpToWGPULoadOp(RTAttachmentDesc.LoadOp) : WGPULoadOp_Load;
@@ -1845,7 +1914,7 @@ void DeviceContextWebGPUImpl::CommitSubpassRenderTargets()
 
             if (RTAttachmentDesc.LoadOp == ATTACHMENT_LOAD_OP_CLEAR)
             {
-                const auto ClearColor = m_AttachmentClearValues[RTAttachmentRef.AttachmentIndex].Color;
+                const float* ClearColor = m_AttachmentClearValues[RTAttachmentRef.AttachmentIndex].Color;
 
                 RenderPassColorAttachments[RTIndex].clearValue = WGPUColor{ClearColor[0], ClearColor[1], ClearColor[2], ClearColor[3]};
             }
@@ -1855,7 +1924,7 @@ void DeviceContextWebGPUImpl::CommitSubpassRenderTargets()
                 if (Subpass.pResolveAttachments != nullptr && Subpass.pResolveAttachments[RTIndex].AttachmentIndex != ATTACHMENT_UNUSED)
                 {
                     VERIFY_EXPR(Subpass.pResolveAttachments[RTIndex].AttachmentIndex < RPDesc.AttachmentCount);
-                    auto* pDstView = ClassPtrCast<TextureViewWebGPUImpl>(FBDesc.ppAttachments[Subpass.pResolveAttachments[RTIndex].AttachmentIndex]);
+                    TextureViewWebGPUImpl* pDstView = ClassPtrCast<TextureViewWebGPUImpl>(FBDesc.ppAttachments[Subpass.pResolveAttachments[RTIndex].AttachmentIndex]);
 
                     RenderPassColorAttachments[RTIndex].resolveTarget = pDstView->GetWebGPUTextureView();
                 }
@@ -1877,13 +1946,13 @@ void DeviceContextWebGPUImpl::CommitSubpassRenderTargets()
     WGPURenderPassDepthStencilAttachment RenderPassDepthStencilAttachment{};
     if (m_pBoundDepthStencil)
     {
-        const auto& DSAttachmentRef = *Subpass.pDepthStencilAttachment;
+        const AttachmentReference& DSAttachmentRef = *Subpass.pDepthStencilAttachment;
         VERIFY_EXPR(Subpass.pDepthStencilAttachment != nullptr && DSAttachmentRef.AttachmentIndex != ATTACHMENT_UNUSED);
         VERIFY(m_pBoundDepthStencil == (DSAttachmentRef.State == RESOURCE_STATE_DEPTH_READ ? m_pBoundFramebuffer->GetReadOnlyDSV(m_SubpassIndex) : FBDesc.ppAttachments[DSAttachmentRef.AttachmentIndex]),
                "Depth-stencil buffer in the device context is inconsistent with the framebuffer");
-        const auto  FirstLastUse     = m_pActiveRenderPass->GetAttachmentFirstLastUse(DSAttachmentRef.AttachmentIndex);
-        const auto& DSAttachmentDesc = RPDesc.pAttachments[DSAttachmentRef.AttachmentIndex];
-        const auto  FormatAttribs    = GetTextureFormatAttribs(DSAttachmentDesc.Format);
+        const auto                      FirstLastUse     = m_pActiveRenderPass->GetAttachmentFirstLastUse(DSAttachmentRef.AttachmentIndex);
+        const RenderPassAttachmentDesc& DSAttachmentDesc = RPDesc.pAttachments[DSAttachmentRef.AttachmentIndex];
+        const TextureFormatAttribs      FormatAttribs    = GetTextureFormatAttribs(DSAttachmentDesc.Format);
 
         RenderPassDepthStencilAttachment.view = m_pBoundDepthStencil->GetWebGPUTextureView();
         if (FirstLastUse.first == m_SubpassIndex)
@@ -1951,7 +2020,7 @@ void DeviceContextWebGPUImpl::ClearAttachment(Int32                     RTIndex,
     // How to clear integer texture view?
     VERIFY_EXPR(m_wgpuRenderPassEncoder);
 
-    auto& AttachmentCleaner = m_pDevice->GetAttachmentCleaner();
+    AttachmentCleanerWebGPU& AttachmentCleaner = m_pDevice->GetAttachmentCleaner();
 
     AttachmentCleanerWebGPU::RenderPassInfo RPInfo{};
     RPInfo.NumRenderTargets = m_NumBoundRenderTargets;
@@ -1991,8 +2060,7 @@ void DeviceContextWebGPUImpl::ClearAttachment(Int32                     RTIndex,
 WGPURenderPassEncoder DeviceContextWebGPUImpl::PrepareForDraw(DRAW_FLAGS Flags)
 {
 #ifdef DILIGENT_DEVELOPMENT
-    if ((Flags & DRAW_FLAG_VERIFY_RENDER_TARGETS) != 0)
-        DvpVerifyRenderTargets();
+    DvpVerifyRenderTargets();
 #endif
     DEV_CHECK_ERR(m_pPipelineState != nullptr, "No PSO is bound in the context");
 
@@ -2029,7 +2097,7 @@ WGPURenderPassEncoder DeviceContextWebGPUImpl::PrepareForDraw(DRAW_FLAGS Flags)
         m_EncoderState.SetUpToDate(WebGPUEncoderState::CMD_ENCODER_STATE_STENCIL_REF);
     }
 
-    if (auto CommitSRBMask = m_BindInfo.GetCommitMask(Flags & DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT))
+    if (CommittedShaderResources::SRBMaskType CommitSRBMask = m_BindInfo.GetCommitMask(Flags & DRAW_FLAG_DYNAMIC_RESOURCE_BUFFERS_INTACT))
         CommitBindGroups(wgpuRenderCmdEncoder, CommitSRBMask);
 
     return wgpuRenderCmdEncoder;
@@ -2056,7 +2124,7 @@ WGPUComputePassEncoder DeviceContextWebGPUImpl::PrepareForDispatchCompute()
     if (!m_EncoderState.IsUpToDate(WebGPUEncoderState::CMD_ENCODER_STATE_PIPELINE_STATE))
         CommitComputePSO(wgpuComputeCmdEncoder);
 
-    if (auto CommitSRBMask = m_BindInfo.GetCommitMask())
+    if (CommittedShaderResources::SRBMaskType CommitSRBMask = m_BindInfo.GetCommitMask())
         CommitBindGroups(wgpuComputeCmdEncoder, CommitSRBMask);
 
     return wgpuComputeCmdEncoder;
@@ -2068,11 +2136,11 @@ WGPUBuffer DeviceContextWebGPUImpl::PrepareForIndirectCommand(IBuffer* pAttribsB
 
     BufferWebGPUImpl* pAttribsBufferWebGPU = ClassPtrCast<BufferWebGPUImpl>(pAttribsBuffer);
 
-    WGPUBuffer wgpuIndirectBuffer = pAttribsBufferWebGPU->m_wgpuBuffer.Get();
+    WGPUBuffer wgpuIndirectBuffer = pAttribsBufferWebGPU->m_wgpuBuffer;
     if (wgpuIndirectBuffer == nullptr)
     {
         VERIFY_EXPR(pAttribsBufferWebGPU->GetDesc().Usage == USAGE_DYNAMIC);
-        const auto& DynamicAlloc = pAttribsBufferWebGPU->GetDynamicAllocation(GetContextId());
+        const DynamicMemoryManagerWebGPU::Allocation& DynamicAlloc = GetDynamicBufferAllocation(pAttribsBufferWebGPU);
 
         wgpuIndirectBuffer = DynamicAlloc.wgpuBuffer;
         IdirectBufferOffset += DynamicAlloc.Offset;
@@ -2089,9 +2157,9 @@ void DeviceContextWebGPUImpl::CommitGraphicsPSO(WGPURenderPassEncoder CmdEncoder
     WGPURenderPipeline wgpuPipeline = m_pPipelineState->GetWebGPURenderPipeline();
     wgpuRenderPassEncoderSetPipeline(CmdEncoder, wgpuPipeline);
 
-    const auto& GraphicsPipeline = m_pPipelineState->GetGraphicsPipelineDesc();
-    const auto& BlendDesc        = GraphicsPipeline.BlendDesc;
-    const auto& DepthDesc        = GraphicsPipeline.DepthStencilDesc;
+    const GraphicsPipelineDesc&  GraphicsPipeline = m_pPipelineState->GetGraphicsPipelineDesc();
+    const BlendStateDesc&        BlendDesc        = GraphicsPipeline.BlendDesc;
+    const DepthStencilStateDesc& DepthDesc        = GraphicsPipeline.DepthStencilDesc;
 
     m_EncoderState.SetUpToDate(WebGPUEncoderState::CMD_ENCODER_STATE_PIPELINE_STATE);
 
@@ -2146,10 +2214,7 @@ void DeviceContextWebGPUImpl::CommitVertexBuffers(WGPURenderPassEncoder CmdEncod
             if (Desc.Usage == USAGE_DYNAMIC)
             {
                 m_EncoderState.HasDynamicVertexBuffers = true;
-#ifdef DILIGENT_DEVELOPMENT
-                pBufferWebGPU->DvpVerifyDynamicAllocation(this);
-#endif
-                Offset += pBufferWebGPU->GetDynamicOffset(GetContextId(), this);
+                Offset += GetDynamicBufferOffset(pBufferWebGPU);
             }
             VERIFY_EXPR(Desc.Size >= CurrStream.Offset);
             Size = Desc.Size - CurrStream.Offset;
@@ -2172,7 +2237,7 @@ void DeviceContextWebGPUImpl::CommitIndexBuffer(WGPURenderPassEncoder CmdEncoder
     DEV_CHECK_ERR(IndexType == VT_UINT16 || IndexType == VT_UINT32, "Unsupported index format. Only R16_UINT and R32_UINT are allowed.");
 
     const BufferDesc& IndexBuffDesc = m_pIndexBuffer->GetDesc();
-    const Uint64      Offset        = m_IndexDataStartOffset + m_pIndexBuffer->GetDynamicOffset(GetContextId(), this);
+    const Uint64      Offset        = m_IndexDataStartOffset + GetDynamicBufferOffset(m_pIndexBuffer);
     // Do NOT use WGPU_WHOLE_SIZE due to https://github.com/emscripten-core/emscripten/issues/20538
     VERIFY_EXPR(IndexBuffDesc.Size >= m_IndexDataStartOffset);
     const Uint64 Size = IndexBuffDesc.Size - m_IndexDataStartOffset;
@@ -2189,8 +2254,8 @@ void DeviceContextWebGPUImpl::CommitViewports(WGPURenderPassEncoder CmdEncoder)
 
     for (Uint32 ViewportIdx = 0; ViewportIdx < m_NumViewports; ++ViewportIdx)
     {
-        const auto& RHS = m_Viewports[ViewportIdx];
-        const auto& LHS = m_EncoderState.Viewports[ViewportIdx];
+        const Viewport& RHS = m_Viewports[ViewportIdx];
+        const Viewport& LHS = m_EncoderState.Viewports[ViewportIdx];
 
         if (LHS != RHS)
         {
@@ -2223,8 +2288,8 @@ void DeviceContextWebGPUImpl::CommitScissorRects(WGPURenderPassEncoder CmdEncode
     bool UpdateScissorRects = false;
 
     auto UpdateWebGPUScissorRect = [&](const Rect& LHS, Rect& RHS) {
-        const auto ScissorWidth  = std::max(std::min(LHS.right - LHS.left, static_cast<Int32>(m_FramebufferWidth) - LHS.left), 0);
-        const auto ScissorHeight = std::max(std::min(LHS.bottom - LHS.top, static_cast<Int32>(m_FramebufferHeight) - LHS.top), 0);
+        const int ScissorWidth  = std::max(std::min(LHS.right - LHS.left, static_cast<Int32>(m_FramebufferWidth) - LHS.left), 0);
+        const int ScissorHeight = std::max(std::min(LHS.bottom - LHS.top, static_cast<Int32>(m_FramebufferHeight) - LHS.top), 0);
 
         // clang-format off
         if (RHS.left   != LHS.left     ||
@@ -2257,7 +2322,7 @@ void DeviceContextWebGPUImpl::CommitScissorRects(WGPURenderPassEncoder CmdEncode
             UpdateWebGPUScissorRect(ScreenSizeRect, m_EncoderState.ScissorRects[i]);
     }
 
-    for (auto i = NumScissors; i < m_EncoderState.ScissorRects.size(); ++i)
+    for (Uint32 i = NumScissors; i < m_EncoderState.ScissorRects.size(); ++i)
         m_EncoderState.ScissorRects[i] = Rect{};
 
     if (UpdateScissorRects)

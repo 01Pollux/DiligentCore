@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2022 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -92,10 +92,15 @@ class VulkanLogicalDevice : public std::enable_shared_from_this<VulkanLogicalDev
 public:
     using ExtensionFeatures = VulkanPhysicalDevice::ExtensionFeatures;
 
-    static std::shared_ptr<VulkanLogicalDevice> Create(const VulkanPhysicalDevice&  PhysicalDevice,
-                                                       const VkDeviceCreateInfo&    DeviceCI,
-                                                       const ExtensionFeatures&     EnabledExtFeatures,
-                                                       const VkAllocationCallbacks* vkAllocator);
+    struct CreateInfo
+    {
+        const VulkanPhysicalDevice&        PhysicalDevice;
+        const VkDevice                     vkDevice;
+        const VkPhysicalDeviceFeatures&    EnabledFeatures;
+        const ExtensionFeatures&           EnabledExtFeatures;
+        const VkAllocationCallbacks* const vkAllocator;
+    };
+    static std::shared_ptr<VulkanLogicalDevice> Create(const CreateInfo& CI);
 
     // clang-format off
     VulkanLogicalDevice             (const VulkanLogicalDevice&) = delete;
@@ -232,6 +237,9 @@ public:
                         uint32_t    firstQuery,
                         uint32_t    queryCount) const;
 
+    VkResult CopyMemoryToImage(const VkCopyMemoryToImageInfoEXT& CopyInfo) const;
+    VkResult HostTransitionImageLayout(const VkHostImageLayoutTransitionInfoEXT& TransitionInfo) const;
+
     void GetAccelerationStructureBuildSizes(const VkAccelerationStructureBuildGeometryInfoKHR& BuildInfo, const uint32_t* pMaxPrimitiveCounts, VkAccelerationStructureBuildSizesInfoKHR& SizeInfo) const;
 
     VkResult GetRayTracingShaderGroupHandles(VkPipeline pipeline, uint32_t firstGroup, uint32_t groupCount, size_t dataSize, void* pData) const;
@@ -243,10 +251,7 @@ public:
     const ExtensionFeatures&        GetEnabledExtFeatures() const { return m_EnabledExtFeatures; }
 
 private:
-    VulkanLogicalDevice(const VulkanPhysicalDevice&  PhysicalDevice,
-                        const VkDeviceCreateInfo&    DeviceCI,
-                        const ExtensionFeatures&     EnabledExtFeatures,
-                        const VkAllocationCallbacks* vkAllocator);
+    VulkanLogicalDevice(const CreateInfo& CI);
 
     template <typename VkObjectType,
               VulkanHandleTypeId VkTypeId,

@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,6 +32,9 @@
 
 #include <atomic>
 #include <thread>
+#include <vector>
+#include <unordered_set>
+#include <mutex>
 
 #include "RenderDevice.h"
 #include "DeviceObjectBase.hpp"
@@ -48,6 +51,7 @@
 #include "STDAllocator.hpp"
 #include "IndexWrapper.hpp"
 #include "ThreadPool.hpp"
+#include "SpinLock.hpp"
 
 namespace Diligent
 {
@@ -71,6 +75,9 @@ namespace Diligent
 ///
 DeviceFeatures EnableDeviceFeatures(const DeviceFeatures& SupportedFeatures,
                                     const DeviceFeatures& RequestedFeatures) noexcept(false);
+
+DeviceFeaturesVk EnableDeviceFeaturesVk(const DeviceFeaturesVk& SupportedFeatures,
+                                        const DeviceFeaturesVk& RequestedFeatures) noexcept(false);
 
 /// Checks sparse texture format support and returns the component type
 COMPONENT_TYPE CheckSparseTextureFormatSupport(TEXTURE_FORMAT                  TexFormat,
@@ -133,7 +140,7 @@ public:
         m_AdapterInfo         {AdapterInfo},
         m_TextureFormatsInfo  (TEX_FORMAT_NUM_FORMATS, TextureFormatInfoExt(), STD_ALLOCATOR_RAW_MEM(TextureFormatInfoExt, RawMemAllocator, "Allocator for vector<TextureFormatInfoExt>")),
         m_TexFmtInfoInitFlags (TEX_FORMAT_NUM_FORMATS, false, STD_ALLOCATOR_RAW_MEM(bool, RawMemAllocator, "Allocator for vector<bool>")),
-        m_wpImmediateContexts (std::max(1u, EngineCI.NumImmediateContexts), RefCntWeakPtr<DeviceContextImplType>(), STD_ALLOCATOR_RAW_MEM(RefCntWeakPtr<DeviceContextImplType>, RawMemAllocator, "Allocator for vector<RefCntWeakPtr<DeviceContextImplType>>")),
+        m_wpImmediateContexts ((std::max)(1u, EngineCI.NumImmediateContexts), RefCntWeakPtr<DeviceContextImplType>(), STD_ALLOCATOR_RAW_MEM(RefCntWeakPtr<DeviceContextImplType>, RawMemAllocator, "Allocator for vector<RefCntWeakPtr<DeviceContextImplType>>")),
         m_wpDeferredContexts  (EngineCI.NumDeferredContexts, RefCntWeakPtr<DeviceContextImplType>(), STD_ALLOCATOR_RAW_MEM(RefCntWeakPtr<DeviceContextImplType>, RawMemAllocator, "Allocator for vector<RefCntWeakPtr<DeviceContextImplType>>")),
         m_RawMemAllocator     {RawMemAllocator},
         m_TexObjAllocator     {RawMemAllocator, sizeof(TextureImplType),                   16},
@@ -208,6 +215,9 @@ public:
 
     ~RenderDeviceBase()
     {
+        VERIFY(m_RecycledDynamicBufferIds.size() == m_NextDynamicBufferId, "Not all dynamic buffer IDs have been recycled");
+        VERIFY(m_RecycledDynamicBufferIds.size() == m_DbgRecycledDynamicBufferIds.size(),
+               "Recycled dynamic buffer ID set does not match the actual number of recycled IDs. This may happen if there were duplicate IDs or because of a bug.");
     }
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_RenderDevice, ObjectBase<BaseInterface>)
@@ -228,13 +238,13 @@ public:
         DEV_CHECK_ERR(*ppMapping == nullptr, "Overwriting reference to existing object may cause memory leaks");
         DEV_CHECK_ERR(ResMappingCI.pEntries == nullptr || ResMappingCI.NumEntries != 0, "Starting with API253010, the number of entries is defined through the NumEntries member.");
 
-        auto* pResourceMapping{NEW_RC_OBJ(m_ResMappingAllocator, "ResourceMappingImpl instance", ResourceMappingImpl)(GetRawAllocator())};
+        ResourceMappingImpl* pResourceMapping{NEW_RC_OBJ(m_ResMappingAllocator, "ResourceMappingImpl instance", ResourceMappingImpl)(GetRawAllocator())};
         pResourceMapping->QueryInterface(IID_ResourceMapping, reinterpret_cast<IObject**>(ppMapping));
         if (ResMappingCI.pEntries != nullptr)
         {
             for (Uint32 i = 0; i < ResMappingCI.NumEntries; ++i)
             {
-                const auto& Entry = ResMappingCI.pEntries[i];
+                const ResourceMappingEntry& Entry = ResMappingCI.pEntries[i];
                 if (Entry.Name != nullptr && Entry.pObject != nullptr)
                     (*ppMapping)->AddResourceArray(Entry.Name, Entry.ArrayIndex, &Entry.pObject, 1, true);
                 else
@@ -260,7 +270,7 @@ public:
     virtual const TextureFormatInfo& DILIGENT_CALL_TYPE GetTextureFormatInfo(TEXTURE_FORMAT TexFormat) const override final
     {
         VERIFY(TexFormat >= TEX_FORMAT_UNKNOWN && TexFormat < TEX_FORMAT_NUM_FORMATS, "Texture format out of range");
-        const auto& TexFmtInfo = m_TextureFormatsInfo[TexFormat];
+        const TextureFormatInfoExt& TexFmtInfo = m_TextureFormatsInfo[TexFormat];
         VERIFY(TexFmtInfo.Format == TexFormat, "Sanity check failed");
         return TexFmtInfo;
     }
@@ -269,7 +279,7 @@ public:
     virtual const TextureFormatInfoExt& DILIGENT_CALL_TYPE GetTextureFormatInfoExt(TEXTURE_FORMAT TexFormat) override final
     {
         VERIFY(TexFormat >= TEX_FORMAT_UNKNOWN && TexFormat < TEX_FORMAT_NUM_FORMATS, "Texture format out of range");
-        const auto& TexFmtInfo = m_TextureFormatsInfo[TexFormat];
+        const TextureFormatInfoExt& TexFmtInfo = m_TextureFormatsInfo[TexFormat];
         VERIFY(TexFmtInfo.Format == TexFormat, "Sanity check failed");
         if (!m_TexFmtInfoInitFlags[TexFormat])
         {
@@ -299,13 +309,6 @@ public:
         m_wpImmediateContexts[Ctx] = pImmediateContext;
     }
 
-    /// Set weak reference to the deferred context
-    void SetDeferredContext(size_t Ctx, DeviceContextImplType* pDeferredCtx)
-    {
-        VERIFY(m_wpDeferredContexts[Ctx].Lock() == nullptr, "Deferred context has already been set");
-        m_wpDeferredContexts[Ctx] = pDeferredCtx;
-    }
-
     /// Returns the number of immediate contexts
     size_t GetNumImmediateContexts() const
     {
@@ -315,11 +318,23 @@ public:
     /// Returns number of deferred contexts
     size_t GetNumDeferredContexts() const
     {
+        std::lock_guard<std::mutex> Guard{m_DeferredCtxMtx};
         return m_wpDeferredContexts.size();
     }
 
-    RefCntAutoPtr<DeviceContextImplType> GetImmediateContext(size_t Ctx) { return m_wpImmediateContexts[Ctx].Lock(); }
-    RefCntAutoPtr<DeviceContextImplType> GetDeferredContext(size_t Ctx) { return m_wpDeferredContexts[Ctx].Lock(); }
+    RefCntAutoPtr<DeviceContextImplType> GetImmediateContext(size_t Ctx)
+    {
+        return Ctx < m_wpImmediateContexts.size() ?
+            m_wpImmediateContexts[Ctx].Lock() :
+            RefCntAutoPtr<DeviceContextImplType>{};
+    }
+    RefCntAutoPtr<DeviceContextImplType> GetDeferredContext(size_t Ctx)
+    {
+        std::lock_guard<std::mutex> Guard{m_DeferredCtxMtx};
+        return Ctx < m_wpDeferredContexts.size() ?
+            m_wpDeferredContexts[Ctx].Lock() :
+            RefCntAutoPtr<DeviceContextImplType>{};
+    }
 
     FixedBlockMemoryAllocator& GetTexViewObjAllocator() { return m_TexViewObjAllocator; }
     FixedBlockMemoryAllocator& GetBuffViewObjAllocator() { return m_BuffViewObjAllocator; }
@@ -343,6 +358,33 @@ public:
         return m_pShaderCompilationThreadPool;
     }
 
+    Uint32 AllocateDynamicBufferId()
+    {
+        Threading::SpinLockGuard Guard{m_RecycledDynamicBufferIdsLock};
+        if (!m_RecycledDynamicBufferIds.empty())
+        {
+            Uint32 Id = m_RecycledDynamicBufferIds.back();
+            m_RecycledDynamicBufferIds.pop_back();
+#ifdef DILIGENT_DEBUG
+            m_DbgRecycledDynamicBufferIds.erase(Id);
+#endif
+            return Id;
+        }
+        else
+        {
+            return m_NextDynamicBufferId.fetch_add(1);
+        }
+    }
+
+    void RecycleDynamicBufferId(Uint32 Id)
+    {
+        Threading::SpinLockGuard Guard{m_RecycledDynamicBufferIdsLock};
+        m_RecycledDynamicBufferIds.push_back(Id);
+#ifdef DILIGENT_DEBUG
+        VERIFY(m_DbgRecycledDynamicBufferIds.emplace(Id).second, "Dynamic buffer ID ", Id, " has already been recycled. This appears to be a bug.");
+#endif
+    }
+
 protected:
     virtual void TestTextureFormat(TEXTURE_FORMAT TexFormat) = 0;
 
@@ -357,17 +399,17 @@ protected:
         }
         else if (NumThreads != 0)
         {
-            const Uint32 NumCores = std::max(std::thread::hardware_concurrency(), 1u);
+            const Uint32 NumCores = (std::max)(std::thread::hardware_concurrency(), 1u);
 
             ThreadPoolCreateInfo ThreadPoolCI;
             if (NumThreads == ~0u)
             {
                 // Leave one core for the main thread
-                ThreadPoolCI.NumThreads = std::max(NumCores, 2u) - 1u;
+                ThreadPoolCI.NumThreads = (std::max)(NumCores, 2u) - 1u;
             }
             else
             {
-                ThreadPoolCI.NumThreads = std::min(NumThreads, std::max(NumCores * 4, 128u));
+                ThreadPoolCI.NumThreads = (std::min)(NumThreads, (std::max)(NumCores * 4, 128u));
             }
             m_pShaderCompilationThreadPool = CreateThreadPool(ThreadPoolCI);
         }
@@ -415,14 +457,14 @@ protected:
                 (*ppObject)->Release();
                 *ppObject = nullptr;
             }
-            const auto ObjectDescString = GetObjectDescString(Desc);
+            const std::string ObjectDescString = GetObjectDescString(Desc);
             if (!ObjectDescString.empty())
             {
-                LOG_ERROR("Failed to create ", ObjectTypeName, " object '", (Desc.Name ? Desc.Name : ""), "'\n", ObjectDescString);
+                LOG_ERROR("Failed to create ", ObjectTypeName, " '", (Desc.Name ? Desc.Name : ""), "'\n", ObjectDescString);
             }
             else
             {
-                LOG_ERROR("Failed to create ", ObjectTypeName, " object '", (Desc.Name ? Desc.Name : ""), "'");
+                LOG_ERROR("Failed to create ", ObjectTypeName, " '", (Desc.Name ? Desc.Name : ""), "'");
             }
         }
     }
@@ -433,7 +475,7 @@ protected:
         CreateDeviceObject("Pipeline State", PSOCreateInfo.PSODesc, ppPipelineState,
                            [&]() //
                            {
-                               auto* pPipelineStateImpl = NEW_RC_OBJ(m_PSOAllocator, "Pipeline State instance", PipelineStateImplType)(static_cast<RenderDeviceImplType*>(this), PSOCreateInfo, ExtraArgs...);
+                               PipelineStateImplType* pPipelineStateImpl = NEW_RC_OBJ(m_PSOAllocator, "Pipeline State instance", PipelineStateImplType)(static_cast<RenderDeviceImplType*>(this), PSOCreateInfo, ExtraArgs...);
                                pPipelineStateImpl->QueryInterface(IID_PipelineState, reinterpret_cast<IObject**>(ppPipelineState));
                            });
     }
@@ -444,7 +486,7 @@ protected:
         CreateDeviceObject("Buffer", BuffDesc, ppBuffer,
                            [&]() //
                            {
-                               auto* pBufferImpl = NEW_RC_OBJ(m_BufObjAllocator, "Buffer instance", BufferImplType)(m_BuffViewObjAllocator, static_cast<RenderDeviceImplType*>(this), BuffDesc, ExtraArgs...);
+                               BufferImplType* pBufferImpl = NEW_RC_OBJ(m_BufObjAllocator, "Buffer instance", BufferImplType)(m_BuffViewObjAllocator, static_cast<RenderDeviceImplType*>(this), BuffDesc, ExtraArgs...);
                                pBufferImpl->QueryInterface(IID_Buffer, reinterpret_cast<IObject**>(ppBuffer));
                                pBufferImpl->CreateDefaultViews();
                            });
@@ -456,7 +498,7 @@ protected:
         CreateDeviceObject("Texture", TexDesc, ppTexture,
                            [&]() //
                            {
-                               auto* pTextureImpl = NEW_RC_OBJ(m_TexObjAllocator, "Texture instance", TextureImplType)(m_TexViewObjAllocator, static_cast<RenderDeviceImplType*>(this), TexDesc, ExtraArgs...);
+                               TextureImplType* pTextureImpl = NEW_RC_OBJ(m_TexObjAllocator, "Texture instance", TextureImplType)(m_TexViewObjAllocator, static_cast<RenderDeviceImplType*>(this), TexDesc, ExtraArgs...);
                                pTextureImpl->QueryInterface(IID_Texture, reinterpret_cast<IObject**>(ppTexture));
                                pTextureImpl->CreateDefaultViews();
                            });
@@ -468,7 +510,7 @@ protected:
         CreateDeviceObject("Shader", ShaderCI.Desc, ppShader,
                            [&]() //
                            {
-                               auto* pShaderImpl = NEW_RC_OBJ(m_ShaderObjAllocator, "Shader instance", ShaderImplType)(static_cast<RenderDeviceImplType*>(this), ShaderCI, ExtraArgs...);
+                               ShaderImplType* pShaderImpl = NEW_RC_OBJ(m_ShaderObjAllocator, "Shader instance", ShaderImplType)(static_cast<RenderDeviceImplType*>(this), ShaderCI, ExtraArgs...);
                                pShaderImpl->QueryInterface(IID_Shader, reinterpret_cast<IObject**>(ppShader));
                            });
     }
@@ -479,7 +521,7 @@ protected:
         CreateDeviceObject("Sampler", SamplerDesc, ppSampler,
                            [&]() //
                            {
-                               auto pSampler = m_SamplersRegistry.Get(
+                               RefCntAutoPtr<ISampler> pSampler = m_SamplersRegistry.Get(
                                    SamplerDesc,
                                    [&]() {
                                        return RefCntAutoPtr<ISampler>{NEW_RC_OBJ(m_SamplerObjAllocator, "Sampler instance", SamplerImplType)(static_cast<RenderDeviceImplType*>(this), SamplerDesc, ExtraArgs...)};
@@ -495,7 +537,7 @@ protected:
         CreateDeviceObject("Fence", Desc, ppFence,
                            [&]() //
                            {
-                               auto* pFenceImpl = NEW_RC_OBJ(m_FenceAllocator, "Fence instance", FenceImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
+                               FenceImplType* pFenceImpl = NEW_RC_OBJ(m_FenceAllocator, "Fence instance", FenceImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
                                pFenceImpl->QueryInterface(IID_Fence, reinterpret_cast<IObject**>(ppFence));
                            });
     }
@@ -505,7 +547,7 @@ protected:
         CreateDeviceObject("Query", Desc, ppQuery,
                            [&]() //
                            {
-                               auto* pQueryImpl = NEW_RC_OBJ(m_QueryAllocator, "Query instance", QueryImplType)(static_cast<RenderDeviceImplType*>(this), Desc);
+                               QueryImplType* pQueryImpl = NEW_RC_OBJ(m_QueryAllocator, "Query instance", QueryImplType)(static_cast<RenderDeviceImplType*>(this), Desc);
                                pQueryImpl->QueryInterface(IID_Query, reinterpret_cast<IObject**>(ppQuery));
                            });
     }
@@ -513,10 +555,10 @@ protected:
     template <typename... ExtraArgsType>
     void CreateRenderPassImpl(IRenderPass** ppRenderPass, const RenderPassDesc& Desc, const ExtraArgsType&... ExtraArgs)
     {
-        CreateDeviceObject("RenderPass", Desc, ppRenderPass,
+        CreateDeviceObject("Render Pass", Desc, ppRenderPass,
                            [&]() //
                            {
-                               auto* pRenderPassImpl = NEW_RC_OBJ(m_RenderPassAllocator, "Render instance", RenderPassImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
+                               RenderPassImplType* pRenderPassImpl = NEW_RC_OBJ(m_RenderPassAllocator, "Render instance", RenderPassImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
                                pRenderPassImpl->QueryInterface(IID_RenderPass, reinterpret_cast<IObject**>(ppRenderPass));
                            });
     }
@@ -527,7 +569,7 @@ protected:
         CreateDeviceObject("Framebuffer", Desc, ppFramebuffer,
                            [&]() //
                            {
-                               auto* pFramebufferImpl = NEW_RC_OBJ(m_FramebufferAllocator, "Framebuffer instance", FramebufferImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
+                               FramebufferImplType* pFramebufferImpl = NEW_RC_OBJ(m_FramebufferAllocator, "Framebuffer instance", FramebufferImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
                                pFramebufferImpl->QueryInterface(IID_Framebuffer, reinterpret_cast<IObject**>(ppFramebuffer));
                            });
     }
@@ -535,10 +577,10 @@ protected:
     template <typename... ExtraArgsType>
     void CreateBLASImpl(IBottomLevelAS** ppBLAS, const BottomLevelASDesc& Desc, const ExtraArgsType&... ExtraArgs)
     {
-        CreateDeviceObject("BottomLevelAS", Desc, ppBLAS,
+        CreateDeviceObject("Bottom-level AS", Desc, ppBLAS,
                            [&]() //
                            {
-                               auto* pBottomLevelASImpl = NEW_RC_OBJ(m_BLASAllocator, "BottomLevelAS instance", BottomLevelASImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
+                               BottomLevelASImplType* pBottomLevelASImpl = NEW_RC_OBJ(m_BLASAllocator, "BottomLevelAS instance", BottomLevelASImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
                                pBottomLevelASImpl->QueryInterface(IID_BottomLevelAS, reinterpret_cast<IObject**>(ppBLAS));
                            });
     }
@@ -546,20 +588,20 @@ protected:
     template <typename... ExtraArgsType>
     void CreateTLASImpl(ITopLevelAS** ppTLAS, const TopLevelASDesc& Desc, const ExtraArgsType&... ExtraArgs)
     {
-        CreateDeviceObject("TopLevelAS", Desc, ppTLAS,
+        CreateDeviceObject("Top-level AS", Desc, ppTLAS,
                            [&]() //
                            {
-                               auto* pTopLevelASImpl = NEW_RC_OBJ(m_TLASAllocator, "TopLevelAS instance", TopLevelASImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
+                               TopLevelASImplType* pTopLevelASImpl = NEW_RC_OBJ(m_TLASAllocator, "TopLevelAS instance", TopLevelASImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
                                pTopLevelASImpl->QueryInterface(IID_TopLevelAS, reinterpret_cast<IObject**>(ppTLAS));
                            });
     }
 
     void CreateSBTImpl(IShaderBindingTable** ppSBT, const ShaderBindingTableDesc& Desc)
     {
-        CreateDeviceObject("ShaderBindingTable", Desc, ppSBT,
+        CreateDeviceObject("Shader Binding Table", Desc, ppSBT,
                            [&]() //
                            {
-                               auto* pSBTImpl = NEW_RC_OBJ(m_SBTAllocator, "ShaderBindingTable instance", ShaderBindingTableImplType)(static_cast<RenderDeviceImplType*>(this), Desc);
+                               ShaderBindingTableImplType* pSBTImpl = NEW_RC_OBJ(m_SBTAllocator, "ShaderBindingTable instance", ShaderBindingTableImplType)(static_cast<RenderDeviceImplType*>(this), Desc);
                                pSBTImpl->QueryInterface(IID_ShaderBindingTable, reinterpret_cast<IObject**>(ppSBT));
                            });
     }
@@ -567,10 +609,10 @@ protected:
     template <typename... ExtraArgsType>
     void CreatePipelineResourceSignatureImpl(IPipelineResourceSignature** ppSignature, const PipelineResourceSignatureDesc& Desc, const ExtraArgsType&... ExtraArgs)
     {
-        CreateDeviceObject("PipelineResourceSignature", Desc, ppSignature,
+        CreateDeviceObject("Pipeline Resource Signature", Desc, ppSignature,
                            [&]() //
                            {
-                               auto* pPRSImpl = NEW_RC_OBJ(m_PipeResSignAllocator, "PipelineResourceSignature instance", PipelineResourceSignatureImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
+                               PipelineResourceSignatureImplType* pPRSImpl = NEW_RC_OBJ(m_PipeResSignAllocator, "PipelineResourceSignature instance", PipelineResourceSignatureImplType)(static_cast<RenderDeviceImplType*>(this), Desc, ExtraArgs...);
                                pPRSImpl->QueryInterface(IID_PipelineResourceSignature, reinterpret_cast<IObject**>(ppSignature));
                            });
     }
@@ -578,22 +620,62 @@ protected:
     template <typename... ExtraArgsType>
     void CreateDeviceMemoryImpl(IDeviceMemory** ppMemory, const DeviceMemoryCreateInfo& MemCI, const ExtraArgsType&... ExtraArgs)
     {
-        CreateDeviceObject("DeviceMemory", MemCI.Desc, ppMemory,
+        CreateDeviceObject("Device Memory", MemCI.Desc, ppMemory,
                            [&]() //
                            {
-                               auto* pDevMemImpl = NEW_RC_OBJ(m_MemObjAllocator, "DeviceMemory instance", DeviceMemoryImplType)(static_cast<RenderDeviceImplType*>(this), MemCI, ExtraArgs...);
+                               DeviceMemoryImplType* pDevMemImpl = NEW_RC_OBJ(m_MemObjAllocator, "DeviceMemory instance", DeviceMemoryImplType)(static_cast<RenderDeviceImplType*>(this), MemCI, ExtraArgs...);
                                pDevMemImpl->QueryInterface(IID_DeviceMemory, reinterpret_cast<IObject**>(ppMemory));
                            });
     }
 
     void CreatePipelineStateCacheImpl(IPipelineStateCache** ppCache, const PipelineStateCacheCreateInfo& PSOCacheCI)
     {
-        CreateDeviceObject("PSOCache", PSOCacheCI.Desc, ppCache,
+        CreateDeviceObject("PSO Cache", PSOCacheCI.Desc, ppCache,
                            [&]() //
                            {
-                               auto* pPSOCacheImpl = NEW_RC_OBJ(m_PSOCacheAllocator, "PSOCache instance", PipelineStateCacheImplType)(static_cast<RenderDeviceImplType*>(this), PSOCacheCI);
+                               PipelineStateCacheImplType* pPSOCacheImpl = NEW_RC_OBJ(m_PSOCacheAllocator, "PSOCache instance", PipelineStateCacheImplType)(static_cast<RenderDeviceImplType*>(this), PSOCacheCI);
                                pPSOCacheImpl->QueryInterface(IID_PipelineStateCache, reinterpret_cast<IObject**>(ppCache));
                            });
+    }
+
+    template <typename... ExtraArgsType>
+    void CreateDeferredContextImpl(IDeviceContext** ppContext, const ExtraArgsType&... ExtraArgs)
+    {
+        std::lock_guard<std::mutex> Guard{m_DeferredCtxMtx};
+
+        Uint32 CtxIndex = 0;
+        while (CtxIndex < m_wpDeferredContexts.size() && m_wpDeferredContexts[CtxIndex].IsValid())
+            ++CtxIndex;
+
+        const Uint32      ContextId = static_cast<Uint32>(GetNumImmediateContexts()) + CtxIndex;
+        const std::string CtxName   = std::string{"Deferred context "} + std::to_string(CtxIndex) + " (ContextId: " + std::to_string(ContextId) + ")";
+        DeviceContextDesc Desc{
+            CtxName.c_str(),
+            COMMAND_QUEUE_TYPE_UNKNOWN,
+            true, // IsDeferred
+            ContextId,
+        };
+
+        CreateDeviceObject("Device context", Desc, ppContext,
+                           [&]() //
+                           {
+                               DeviceContextImplType* pCtxImpl = NEW_RC_OBJ(GetRawAllocator(), "DeviceContext instance", DeviceContextImplType)(
+                                   static_cast<RenderDeviceImplType*>(this),
+                                   Desc,
+                                   ExtraArgs...);
+                               pCtxImpl->QueryInterface(IID_DeviceContext, reinterpret_cast<IObject**>(ppContext));
+                           });
+
+        if (*ppContext != nullptr)
+        {
+            if (CtxIndex >= m_wpDeferredContexts.size())
+            {
+                VERIFY_EXPR(CtxIndex == m_wpDeferredContexts.size());
+                m_wpDeferredContexts.resize(CtxIndex + 1);
+            }
+
+            m_wpDeferredContexts[CtxIndex] = static_cast<DeviceContextImplType*>(*ppContext);
+        }
     }
 
 protected:
@@ -615,6 +697,7 @@ protected:
     std::vector<RefCntWeakPtr<DeviceContextImplType>, STDAllocatorRawMem<RefCntWeakPtr<DeviceContextImplType>>> m_wpImmediateContexts;
 
     /// Weak references to deferred contexts.
+    mutable std::mutex                                                                                          m_DeferredCtxMtx;
     std::vector<RefCntWeakPtr<DeviceContextImplType>, STDAllocatorRawMem<RefCntWeakPtr<DeviceContextImplType>>> m_wpDeferredContexts;
 
     IMemoryAllocator&         m_RawMemAllocator;      ///< Raw memory allocator
@@ -641,6 +724,14 @@ protected:
     RefCntAutoPtr<IThreadPool> m_pShaderCompilationThreadPool;
 
     std::atomic<UniqueIdentifier> m_UniqueId{0};
+
+    // Dynamic buffer Ids are used by device contexts to index dynamic allocations
+    std::atomic<Uint32> m_NextDynamicBufferId{0};
+    Threading::SpinLock m_RecycledDynamicBufferIdsLock;
+    std::vector<Uint32> m_RecycledDynamicBufferIds;
+#ifdef DILIGENT_DEBUG
+    std::unordered_set<Uint32> m_DbgRecycledDynamicBufferIds;
+#endif
 };
 
 } // namespace Diligent

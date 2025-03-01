@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.6)
+cmake_minimum_required (VERSION 3.10)
 
 add_library(Diligent-PlatformInterface INTERFACE)
 
@@ -30,7 +30,7 @@ elseif(PLATFORM_LINUX)
 elseif(PLATFORM_APPLE)
 	add_subdirectory(Apple)
 	add_library(Diligent-TargetPlatform ALIAS Diligent-ApplePlatform)
-elseif(PLATFORM_EMSCRIPTEN)
+elseif(PLATFORM_WEB)
 	add_subdirectory(Emscripten)
 	add_library(Diligent-TargetPlatform ALIAS Diligent-EmscriptenPlatform)
     target_link_options(Diligent-EmscriptenPlatform PUBLIC "SHELL: -s DISABLE_EXCEPTION_CATCHING=0'")

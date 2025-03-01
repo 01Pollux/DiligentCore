@@ -4,7 +4,7 @@ on: [push, pull_request]
 
 jobs:
   precheks:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     name: Linux -> Pre-checks
 
     steps:
@@ -27,7 +27,7 @@ jobs:
 
   build:
     needs:   precheks
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
 
     strategy:
       fail-fast: false
@@ -37,43 +37,43 @@ jobs:
             build_type:      "Debug"
             cmake_generator: "Unix Makefiles"
             cmake_args:      "-DDILIGENT_BUILD_TESTS=ON"
-            cc:              "gcc-9"
-            cxx:             "g++-9"
+            cc:              "gcc-14"
+            cxx:             "g++-14"
 
           - name:            "GCC"
             build_type:      "Release"
             cmake_generator: "Unix Makefiles"
             cmake_args:      "-DDILIGENT_BUILD_TESTS=ON"
-            cc:              "gcc-9"
-            cxx:             "g++-9"
+            cc:              "gcc-14"
+            cxx:             "g++-14"
 
           - name:            "Clang"
             build_type:      "Debug"
             cmake_generator: "Ninja"
             cmake_args:      "-DDILIGENT_BUILD_TESTS=ON"
-            cc:              "clang-12"
-            cxx:             "clang++-12"
+            cc:              "clang-18"
+            cxx:             "clang++-18"
 
           - name:            "Clang"
             build_type:      "Release"
             cmake_generator: "Ninja"
             cmake_args:      "-DDILIGENT_BUILD_TESTS=ON"
-            cc:              "clang-12"
-            cxx:             "clang++-12"
+            cc:              "clang-18"
+            cxx:             "clang++-18"
 
           - name:            "Clang-NO_GLSLANG"
             build_type:      "Debug"
             cmake_generator: "Ninja"
             cmake_args:      "-DDILIGENT_BUILD_CORE_TESTS=ON -DDILIGENT_NO_OPENGL=ON -DDILIGENT_NO_GLSLANG=ON"
-            cc:              "clang-12"
-            cxx:             "clang++-12"
+            cc:              "clang-18"
+            cxx:             "clang++-18"
 
           - name:            "Clang-NO_GLSLANG-NO_HLSL"
             build_type:      "Release"
             cmake_generator: "Ninja"
             cmake_args:      "-DDILIGENT_BUILD_CORE_TESTS=ON -DDILIGENT_NO_GLSLANG=ON -DDILIGENT_NO_HLSL=ON"
-            cc:              "clang-12"
-            cxx:             "clang++-12"
+            cc:              "clang-18"
+            cxx:             "clang++-18"
 
     name: Linux -> ${{ matrix.name }}-x64, ${{ matrix.build_type }}
 
@@ -85,14 +85,14 @@ jobs:
 
     - name: Set up build environment
       if:   success()
-      uses: DiligentGraphics/github-action/setup-build-env@v1
+      uses: DiligentGraphics/github-action/setup-build-env@v3
       with:
         platform:        Linux
         cmake-generator: ${{ matrix.cmake_generator }}
 
     - name: Configure CMake
       if:   success()
-      uses: DiligentGraphics/github-action/configure-cmake@v1
+      uses: DiligentGraphics/github-action/configure-cmake@v3
       with:
         cc:         ${{ matrix.cc }}
         cxx:        ${{ matrix.cxx }}
@@ -104,37 +104,41 @@ jobs:
     - name: Build
       id:   build
       if:   success()
-      uses: DiligentGraphics/github-action/build@v1
+      uses: DiligentGraphics/github-action/build@v3
       with:
         target: install
 
     - name: DiligentCoreTest
       if:   success()
-      uses: DiligentGraphics/github-action/run-core-tests@v1
+      uses: DiligentGraphics/github-action/run-core-tests@v3
 
     - name: DiligentCoreAPITest VK
       # NB: it is essential to include failure() to override the default status check of success()
       #     that is automatically applied to if conditions that don't contain a status check function.
       if: ${{ (success() || failure() && steps.build.outcome == 'success') && (matrix.name == 'Clang' || matrix.name == 'GCC') }}
-      uses: DiligentGraphics/github-action/run-core-gpu-tests@v1
+      uses: DiligentGraphics/github-action/run-core-gpu-tests@v3
       with:
         mode: vk_sw
-        args: --gtest_filter=-DrawCommandTest.DrawIndexedInstancedIndirect_FirstInstance_BaseVertex_FirstIndex_VBOffset_IBOffset_InstOffset:TextureCreation/TextureCreationTest.CreateTexture/TEX_FORMAT_BGRA8_TYPELESS
+
+    - name: DiligentCoreAPITest VK Compatibility
+      if: ${{ (success() || failure() && steps.build.outcome == 'success') && (matrix.name == 'Clang' || matrix.name == 'GCC') }}
+      uses: DiligentGraphics/github-action/run-core-gpu-tests@v3
+      with:
+        mode: vk_sw
+        vk-compatibility: true
 
     - name: DiligentCoreAPITest GL
       if: ${{ (success() || failure() && steps.build.outcome == 'success') && (matrix.name == 'Clang' || matrix.name == 'GCC') }}
-      uses: DiligentGraphics/github-action/run-core-gpu-tests@v1
+      uses: DiligentGraphics/github-action/run-core-gpu-tests@v3
       with:
         mode: gl
-        args: "--gtest_filter=-DrawCommandTest.MultiDrawIndirectCount:DrawCommandTest.MultiDrawIndexedIndirectCount:PipelineResourceSignatureTest.StructuredBuffers"
 
     - name: DiligentCoreAPITest GL with Non-Separable Programs
       if: ${{ (success() || failure() && steps.build.outcome == 'success') && (matrix.name == 'Clang' || matrix.name == 'GCC') }}
-      uses: DiligentGraphics/github-action/run-core-gpu-tests@v1
+      uses: DiligentGraphics/github-action/run-core-gpu-tests@v3
       with:
         mode: gl
         non-separable-progs: true
-        args: "--gtest_filter=-DrawCommandTest.MultiDrawIndirectCount:DrawCommandTest.MultiDrawIndexedIndirectCount:PipelineResourceSignatureTest.StructuredBuffers:DrawCommandTest.StructuredBufferArray"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4

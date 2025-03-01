@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -649,6 +649,12 @@ void RenderDeviceGLImpl::CreatePipelineStateCache(const PipelineStateCacheCreate
     *ppPSOCache = nullptr;
 }
 
+void RenderDeviceGLImpl::CreateDeferredContext(IDeviceContext** ppContext)
+{
+    LOG_ERROR_MESSAGE("Deferred contexts are not supported in OpenGL backend.");
+    *ppContext = nullptr;
+}
+
 SparseTextureFormatInfo RenderDeviceGLImpl::GetSparseTextureFormatInfo(TEXTURE_FORMAT     TexFormat,
                                                                        RESOURCE_DIMENSION Dimension,
                                                                        Uint32             SampleCount) const
@@ -668,8 +674,8 @@ void RenderDeviceGLImpl::InitAdapterInfo()
 
     // Set graphics adapter properties
     {
-        std::basic_string<GLubyte> glstrVendor = glGetString(GL_VENDOR);
-        std::string                Vendor      = StrToLower(std::string(glstrVendor.begin(), glstrVendor.end()));
+        const std::string glstrVendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
+        const std::string Vendor      = StrToLower(glstrVendor);
         LOG_INFO_MESSAGE("GPU Vendor: ", Vendor);
 
         for (size_t i = 0; i < _countof(m_AdapterInfo.Description) - 1 && i < glstrVendor.length(); ++i)
@@ -1009,7 +1015,7 @@ void RenderDeviceGLImpl::InitAdapterInfo()
         const bool bS3TC = CheckExtension("GL_EXT_texture_compression_s3tc") || CheckExtension("GL_WEBGL_compressed_texture_s3tc");
         ENABLE_FEATURE(TextureCompressionBC, bRGTC && bBPTC && bS3TC);
 
-#if PLATFORM_EMSCRIPTEN
+#if PLATFORM_WEB
         const bool bETC2 = CheckExtension("GL_WEBGL_compressed_texture_etc");
 #else
         const bool bETC2 = m_DeviceInfo.Type == RENDER_DEVICE_TYPE_GLES || CheckExtension("GL_ARB_ES3_compatibility");
@@ -1130,7 +1136,7 @@ void RenderDeviceGLImpl::FlagSupportedTexFormats()
     const bool bTexNorm16  = bDekstopGL || CheckExtension("GL_EXT_texture_norm16"); // Only for ES3.1+
     const bool bTexSwizzle = bDekstopGL || bGLES30OrAbove || CheckExtension("GL_ARB_texture_swizzle");
 
-#if PLATFORM_EMSCRIPTEN
+#if PLATFORM_WEB
     const bool bETC2 = CheckExtension("GL_WEBGL_compressed_texture_etc");
 #else
     const bool bETC2 = bGLES30OrAbove || CheckExtension("GL_ARB_ES3_compatibility");
@@ -1731,5 +1737,25 @@ void RenderDeviceGLImpl::IdleGPU()
 {
     glFinish();
 }
+
+#if PLATFORM_WIN32
+NativeGLContextAttribs RenderDeviceGLImpl::GetNativeGLContextAttribs() const
+{
+    NativeGLContextAttribs Attribs;
+    Attribs.hDC   = m_GLContext.GetWindowHandleToDeviceContext();
+    Attribs.hGLRC = m_GLContext.GetHandle();
+    return Attribs;
+}
+#elif PLATFORM_ANDROID
+NativeGLContextAttribs RenderDeviceGLImpl::GetNativeGLContextAttribs() const
+{
+    NativeGLContextAttribs Attribs;
+    Attribs.Display = m_GLContext.GetDisplay();
+    Attribs.Surface = m_GLContext.GetSurface();
+    Attribs.Context = m_GLContext.GetEGLCtx();
+    Attribs.Config = m_GLContext.GetConfig();
+    return Attribs;
+}
+#endif
 
 } // namespace Diligent

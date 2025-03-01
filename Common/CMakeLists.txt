@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.6)
+cmake_minimum_required (VERSION 3.10)
 
 project(Diligent-Common CXX)
 
@@ -20,7 +20,9 @@ set(INTERFACE
     interface/FileWrapper.hpp
     interface/FilteringTools.hpp
     interface/FixedBlockMemoryAllocator.hpp
+    interface/GeometryPrimitives.h
     interface/HashUtils.hpp
+    interface/ImageTools.h
     interface/LRUCache.hpp
     interface/FixedLinearAllocator.hpp
     interface/DynamicLinearAllocator.hpp
@@ -56,6 +58,8 @@ set(SOURCE
     src/DefaultRawMemoryAllocator.cpp
     src/FileWrapper.cpp
     src/FixedBlockMemoryAllocator.cpp
+    src/GeometryPrimitives.cpp
+    src/ImageTools.cpp
     src/MemoryFileStream.cpp
     src/Serializer.cpp
     src/SpinLock.cpp

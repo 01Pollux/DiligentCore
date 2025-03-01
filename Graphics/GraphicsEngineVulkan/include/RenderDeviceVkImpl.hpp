@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2023 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -160,6 +160,9 @@ public:
     virtual void DILIGENT_CALL_TYPE CreatePipelineStateCache(const PipelineStateCacheCreateInfo& CreateInfo,
                                                              IPipelineStateCache**               ppPipelineStateCache) override final;
 
+    /// Implementation of IRenderDevice::CreateDeferredContext() in Vulkan backend.
+    virtual void DILIGENT_CALL_TYPE CreateDeferredContext(IDeviceContext** ppContext) override final;
+
     /// Implementation of IRenderDeviceVk::GetVkDevice().
     virtual VkDevice DILIGENT_CALL_TYPE GetVkDevice() override final { return m_LogicalVkDevice->GetVkDevice(); }
 
@@ -222,6 +225,9 @@ public:
                                                                                   RESOURCE_DIMENSION Dimension,
                                                                                   Uint32             SampleCount) const override final;
 
+    /// Implementation of IRenderDeviceVk::GetDeviceFeaturesVk().
+    virtual void DILIGENT_CALL_TYPE GetDeviceFeaturesVk(DeviceFeaturesVk& FeaturesVk) const override final;
+
     DescriptorSetAllocation AllocateDescriptorSet(Uint64 CommandQueueMask, VkDescriptorSetLayout SetLayout, const char* DebugName = "")
     {
         return m_DescriptorSetAllocator.Allocate(CommandQueueMask, SetLayout, DebugName);
@@ -233,8 +239,8 @@ public:
     const VulkanUtilities::VulkanPhysicalDevice& GetPhysicalDevice() const { return *m_PhysicalDevice; }
     const VulkanUtilities::VulkanLogicalDevice&  GetLogicalDevice() const { return *m_LogicalVkDevice; }
 
-    FramebufferCache& GetFramebufferCache() { return m_FramebufferCache; }
-    RenderPassCache&  GetImplicitRenderPassCache() { return m_ImplicitRenderPassCache; }
+    FramebufferCache* GetFramebufferCache() { return m_FramebufferCache.get(); }
+    RenderPassCache*  GetImplicitRenderPassCache() { return m_ImplicitRenderPassCache.get(); }
 
     VulkanUtilities::VulkanMemoryAllocation AllocateMemory(const VkMemoryRequirements& MemReqs, VkMemoryPropertyFlags MemoryProperties, VkMemoryAllocateFlags AllocateFlags = 0)
     {
@@ -257,13 +263,11 @@ public:
 
     struct Properties
     {
-        const Uint32 ShaderGroupHandleSize;
-        const Uint32 MaxShaderRecordStride;
-        const Uint32 ShaderGroupBaseAlignment;
-        const Uint32 MaxDrawMeshTasksCount;
-        const Uint32 MaxRayTracingRecursionDepth;
-        const Uint32 MaxRayGenThreads;
+        Uint32 UploadHeapPageSize  = 0;
+        Uint32 DynamicHeapPageSize = 0;
     };
+
+    const Properties& GetProperties() const { return m_Properties; }
 
     // TODO: use small_vector
     std::vector<uint32_t> ConvertCmdQueueIdsToQueueFamilies(Uint64 CommandQueueMask) const;
@@ -291,12 +295,16 @@ private:
                              Uint64&                                                     SubmittedFenceValue,
                              std::vector<std::pair<Uint64, RefCntAutoPtr<FenceVkImpl>>>* pFences);
 
+private:
+    const Properties m_Properties;
+
     std::shared_ptr<VulkanUtilities::VulkanInstance>       m_VulkanInstance;
     std::unique_ptr<VulkanUtilities::VulkanPhysicalDevice> m_PhysicalDevice;
     std::shared_ptr<VulkanUtilities::VulkanLogicalDevice>  m_LogicalVkDevice;
 
-    FramebufferCache       m_FramebufferCache;
-    RenderPassCache        m_ImplicitRenderPassCache;
+    std::unique_ptr<FramebufferCache> m_FramebufferCache;
+    std::unique_ptr<RenderPassCache>  m_ImplicitRenderPassCache;
+
     DescriptorSetAllocator m_DescriptorSetAllocator;
     DescriptorPoolManager  m_DynamicDescriptorPool;
 

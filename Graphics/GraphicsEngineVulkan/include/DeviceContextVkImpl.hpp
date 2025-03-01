@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -52,6 +52,7 @@
 #include "VulkanUtilities/VulkanCommandBufferPool.hpp"
 #include "VulkanUtilities/VulkanCommandBuffer.hpp"
 #include "VulkanUtilities/VulkanSyncObjectManager.hpp"
+#include "VulkanUtilities/RenderingInfoWrapper.hpp"
 #include "VulkanUploadHeap.hpp"
 #include "VulkanDynamicHeap.hpp"
 #include "ResourceReleaseQueue.hpp"
@@ -70,10 +71,9 @@ class DeviceContextVkImpl final : public DeviceContextNextGenBase<EngineVkImplTr
 public:
     using TDeviceContextBase = DeviceContextNextGenBase<EngineVkImplTraits>;
 
-    DeviceContextVkImpl(IReferenceCounters*       pRefCounters,
-                        RenderDeviceVkImpl*       pDevice,
-                        const EngineVkCreateInfo& EngineCI,
-                        const DeviceContextDesc&  Desc);
+    DeviceContextVkImpl(IReferenceCounters*      pRefCounters,
+                        RenderDeviceVkImpl*      pDevice,
+                        const DeviceContextDesc& Desc);
     ~DeviceContextVkImpl();
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_DeviceContextVk, TDeviceContextBase)
@@ -406,9 +406,16 @@ public:
 
     QueryManagerVk* GetQueryManager() { return m_pQueryMgr; }
 
+    __forceinline size_t GetDynamicBufferOffset(const BufferVkImpl* pBuffer, bool VerifyAllocation = true);
+
+#ifdef DILIGENT_DEVELOPMENT
+    void DvpVerifyDynamicAllocation(const BufferVkImpl* pBuffer) const;
+#endif
+
 private:
     void               TransitionRenderTargets(RESOURCE_STATE_TRANSITION_MODE StateTransitionMode);
     __forceinline void CommitRenderPassAndFramebuffer(bool VerifyStates);
+    __forceinline void EndRenderScope();
     void               CommitVkVertexBuffers();
     void               CommitViewports();
     void               CommitScissorRects();
@@ -449,7 +456,7 @@ private:
         m_State.NumCommands = m_State.NumCommands != 0 ? m_State.NumCommands : 1;
         if (m_CommandBuffer.GetVkCmdBuffer() == VK_NULL_HANDLE)
         {
-            auto vkCmdBuff = m_CmdPool->GetCommandBuffer();
+            VkCommandBuffer vkCmdBuff = m_CmdPool->GetCommandBuffer();
             m_CommandBuffer.SetVkCmdBuffer(vkCmdBuff, m_CmdPool->GetSupportedStagesMask(), m_CmdPool->GetSupportedAccessMask());
         }
     }
@@ -489,6 +496,7 @@ private:
 
     void ChooseRenderPassAndFramebuffer();
 
+private:
     VulkanUtilities::VulkanCommandBuffer m_CommandBuffer;
 
     struct ContextState
@@ -558,7 +566,7 @@ private:
     std::vector<Uint32> m_DynamicBufferOffsets;
 
     /// Temporary array used by CommitDescriptorSets
-    std::array<VkDescriptorSet, MAX_RESOURCE_SIGNATURES* MAX_DESCR_SET_PER_SIGNATURE> m_DescriptorSets = {};
+    std::array<VkDescriptorSet, (MAX_RESOURCE_SIGNATURES * MAX_DESCR_SET_PER_SIGNATURE)> m_DescriptorSets = {};
 
     /// Render pass that matches currently bound render targets.
     /// This render pass may or may not be currently set in the command buffer
@@ -567,6 +575,9 @@ private:
     /// Framebuffer that matches currently bound render targets.
     /// This framebuffer may or may not be currently set in the command buffer
     VkFramebuffer m_vkFramebuffer = VK_NULL_HANDLE;
+
+    /// Dynamic rendering info.
+    std::unique_ptr<VulkanUtilities::RenderingInfoWrapper> m_DynamicRenderingInfo;
 
     FixedBlockMemoryAllocator m_CmdListAllocator;
 
@@ -586,8 +597,6 @@ private:
     // List of fences to signal/wait next time the command context is flushed
     std::vector<std::pair<Uint64, RefCntAutoPtr<FenceVkImpl>>> m_SignalFences;
     std::vector<std::pair<Uint64, RefCntAutoPtr<FenceVkImpl>>> m_WaitFences;
-
-    std::unordered_map<BufferVkImpl*, VulkanUploadAllocation> m_UploadAllocations;
 
     struct MappedTextureKey
     {
@@ -616,6 +625,16 @@ private:
     };
     std::unordered_map<MappedTextureKey, MappedTexture, MappedTextureKey::Hasher> m_MappedTextures;
 
+    struct MappedBuffer
+    {
+        VulkanDynamicAllocation Allocation;
+#ifdef DILIGENT_DEVELOPMENT
+        UniqueIdentifier DvpBufferUID = -1;
+#endif
+    };
+    // NB: using absl::flat_hash_map<const BufferVkImpl*, MappedBuffer> is considerably slower.
+    std::vector<MappedBuffer> m_MappedBuffers;
+
     // Command pools for every queue family
     std::unique_ptr<std::unique_ptr<VulkanUtilities::VulkanCommandBufferPool>[]> m_QueueFamilyCmdPools;
     // Command pool for the family for which we are recording commands
@@ -635,5 +654,27 @@ private:
 
     VulkanUtilities::QueryPoolWrapper m_ASQueryPool;
 };
+
+
+__forceinline size_t DeviceContextVkImpl::GetDynamicBufferOffset(const BufferVkImpl* pBuffer, bool VerifyAllocation)
+{
+    VERIFY_EXPR(pBuffer != nullptr);
+
+    if (pBuffer->m_VulkanBuffer != VK_NULL_HANDLE)
+        return 0;
+
+#ifdef DILIGENT_DEVELOPMENT
+    if (VerifyAllocation)
+    {
+        DvpVerifyDynamicAllocation(pBuffer);
+    }
+#endif
+
+    const Uint32 DynamicBufferId = pBuffer->GetDynamicBufferId();
+    VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", pBuffer->GetDesc().Name, "' does not have dynamic buffer ID");
+    return DynamicBufferId < m_MappedBuffers.size() ?
+        m_MappedBuffers[DynamicBufferId].Allocation.AlignedOffset :
+        0;
+}
 
 } // namespace Diligent

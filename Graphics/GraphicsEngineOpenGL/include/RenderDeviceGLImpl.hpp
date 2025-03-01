@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -185,10 +185,17 @@ public:
     virtual void DILIGENT_CALL_TYPE CreatePipelineStateCache(const PipelineStateCacheCreateInfo& CreateInfo,
                                                              IPipelineStateCache**               ppPSOCache) override final;
 
+    /// Implementation of IRenderDevice::CreateDeferredContext() in OpenGL backend.
+    virtual void DILIGENT_CALL_TYPE CreateDeferredContext(IDeviceContext** ppContext) override final;
+
     /// Implementation of IRenderDevice::GetSparseTextureFormatInfo() in OpenGL backend.
     virtual SparseTextureFormatInfo DILIGENT_CALL_TYPE GetSparseTextureFormatInfo(TEXTURE_FORMAT     TexFormat,
                                                                                   RESOURCE_DIMENSION Dimension,
                                                                                   Uint32             SampleCount) const override final;
+
+#if PLATFORM_WIN32 || PLATFORM_ANDROID
+    virtual NativeGLContextAttribs DILIGENT_CALL_TYPE GetNativeGLContextAttribs() const override final;
+#endif
 
     FBOCache& GetFBOCache(GLContext::NativeGLContextType Context);
     void      OnReleaseTexture(ITexture* pTexture);

@@ -48,6 +48,7 @@ set(INCLUDE
 )
 
 set(VULKAN_UTILS_INCLUDE
+    include/VulkanUtilities/RenderingInfoWrapper.hpp
     include/VulkanUtilities/VulkanCommandBuffer.hpp
     include/VulkanUtilities/VulkanCommandBufferPool.hpp
     include/VulkanUtilities/VulkanDebug.hpp
@@ -128,6 +129,7 @@ set(SRC
 )
 
 set(VULKAN_UTILS_SRC
+    src/VulkanUtilities/RenderingInfoWrapper.cpp
     src/VulkanUtilities/VulkanCommandBuffer.cpp
     src/VulkanUtilities/VulkanCommandBufferPool.cpp
     src/VulkanUtilities/VulkanDebug.cpp
@@ -265,6 +267,9 @@ else()
     find_library(Vulkan_LIBRARY NAMES vulkan)
     list(APPEND PRIVATE_DEPENDENCIES ${Vulkan_LIBRARY})
 endif()
+if(DILIGENT_USE_OPENXR)
+    list(APPEND PRIVATE_DEPENDENCIES OpenXR::headers)
+endif()
 
 set(PUBLIC_DEPENDENCIES
     Diligent-GraphicsEngineVkInterface
@@ -309,6 +314,10 @@ endif()
 
 if (${DILIGENT_NO_GLSLANG})
     message("GLSLang is not being built. Vulkan backend will only be able to consume SPIRV byte code.")
+endif()
+
+if(DILIGENT_USE_OPENXR)
+    list(APPEND PRIVATE_COMPILE_DEFINITIONS DILIGENT_USE_OPENXR=1)
 endif()
 
 target_compile_definitions(Diligent-GraphicsEngineVk-static

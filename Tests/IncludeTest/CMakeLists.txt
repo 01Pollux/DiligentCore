@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.6)
+cmake_minimum_required (VERSION 3.10)
 
 project(DiligentCore-IncludeTest)
 
@@ -72,7 +72,7 @@ if(MSVC)
 endif()
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    if (PLATFORM_EMSCRIPTEN)
+    if (PLATFORM_WEB)
         set_source_files_properties(
             Primitives/ReferenceCountersH_test.c
             PROPERTIES 

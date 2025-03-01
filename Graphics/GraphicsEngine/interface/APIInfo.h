@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -30,7 +30,7 @@
 /// \file
 /// Diligent API information
 
-#define DILIGENT_API_VERSION 255001
+#define DILIGENT_API_VERSION 256007
 
 #include "../../../Primitives/interface/BasicTypes.h"
 
@@ -62,6 +62,7 @@ struct APIInfo
     size_t DisplayModeAttribsSize                DEFAULT_INITIALIZER(0);
     size_t SwapChainDescSize                     DEFAULT_INITIALIZER(0);
     size_t FullScreenModeDescSize                DEFAULT_INITIALIZER(0);
+    size_t OpenXRAttribsSize                     DEFAULT_INITIALIZER(0);
     size_t EngineCreateInfoSize                  DEFAULT_INITIALIZER(0);
     size_t EngineGLCreateInfoSize                DEFAULT_INITIALIZER(0);
     size_t EngineD3D11CreateInfoSize             DEFAULT_INITIALIZER(0);

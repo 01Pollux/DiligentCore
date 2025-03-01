@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.6)
+cmake_minimum_required (VERSION 3.10)
 
 project(Diligent-BasicPlatform CXX)
 
@@ -19,7 +19,7 @@ set(INCLUDE
     include/SearchRecursive.inl
 )
 
-if(PLATFORM_LINUX OR PLATFORM_WIN32 OR PLATFORM_APPLE OR PLATFORM_EMSCRIPTEN)
+if(PLATFORM_LINUX OR PLATFORM_WIN32 OR PLATFORM_APPLE OR PLATFORM_WEB)
     list(APPEND SOURCE src/StandardFile.cpp)
     list(APPEND INTERFACE interface/StandardFile.hpp)
 endif()

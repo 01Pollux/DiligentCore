@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2023 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,12 +34,9 @@
 namespace VulkanUtilities
 {
 
-std::shared_ptr<VulkanLogicalDevice> VulkanLogicalDevice::Create(const VulkanPhysicalDevice&  PhysicalDevice,
-                                                                 const VkDeviceCreateInfo&    DeviceCI,
-                                                                 const ExtensionFeatures&     EnabledExtFeatures,
-                                                                 const VkAllocationCallbacks* vkAllocator)
+std::shared_ptr<VulkanLogicalDevice> VulkanLogicalDevice::Create(const CreateInfo& CI)
 {
-    auto* LogicalDevice = new VulkanLogicalDevice{PhysicalDevice, DeviceCI, EnabledExtFeatures, vkAllocator};
+    VulkanLogicalDevice* LogicalDevice = new VulkanLogicalDevice{CI};
     return std::shared_ptr<VulkanLogicalDevice>{LogicalDevice};
 }
 
@@ -48,24 +45,19 @@ VulkanLogicalDevice::~VulkanLogicalDevice()
     vkDestroyDevice(m_VkDevice, m_VkAllocator);
 }
 
-VulkanLogicalDevice::VulkanLogicalDevice(const VulkanPhysicalDevice&  PhysicalDevice,
-                                         const VkDeviceCreateInfo&    DeviceCI,
-                                         const ExtensionFeatures&     EnabledExtFeatures,
-                                         const VkAllocationCallbacks* vkAllocator) :
-    m_VkAllocator{vkAllocator},
-    m_EnabledFeatures{*DeviceCI.pEnabledFeatures},
-    m_EnabledExtFeatures{EnabledExtFeatures}
+VulkanLogicalDevice::VulkanLogicalDevice(const CreateInfo& CI) :
+    m_VkDevice{CI.vkDevice},
+    m_VkAllocator{CI.vkAllocator},
+    m_EnabledFeatures{CI.EnabledFeatures},
+    m_EnabledExtFeatures{CI.EnabledExtFeatures}
 {
-    auto res = vkCreateDevice(PhysicalDevice.GetVkDeviceHandle(), &DeviceCI, vkAllocator, &m_VkDevice);
-    CHECK_VK_ERROR_AND_THROW(res, "Failed to create logical device");
-
 #if DILIGENT_USE_VOLK
     // Since we only use one device at this time, load device function entries
     // https://github.com/zeux/volk#optimizing-device-calls
     volkLoadDevice(m_VkDevice);
 #endif
 
-    auto GraphicsStages =
+    VkPipelineStageFlags GraphicsStages =
         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
@@ -73,11 +65,11 @@ VulkanLogicalDevice::VulkanLogicalDevice(const VulkanPhysicalDevice&  PhysicalDe
         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
         VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
-    auto ComputeStages =
+    VkPipelineStageFlags ComputeStages =
         VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
-    auto GraphicsAccessMask =
+    VkAccessFlags GraphicsAccessMask =
         VK_ACCESS_INDEX_READ_BIT |
         VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
         VK_ACCESS_INPUT_ATTACHMENT_READ_BIT |
@@ -85,20 +77,20 @@ VulkanLogicalDevice::VulkanLogicalDevice(const VulkanPhysicalDevice&  PhysicalDe
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    auto ComputeAccessMask =
+    VkAccessFlags ComputeAccessMask =
         VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
         VK_ACCESS_UNIFORM_READ_BIT |
         VK_ACCESS_SHADER_READ_BIT |
         VK_ACCESS_SHADER_WRITE_BIT;
-    auto TransferAccessMask =
+    VkAccessFlags TransferAccessMask =
         VK_ACCESS_TRANSFER_READ_BIT |
         VK_ACCESS_TRANSFER_WRITE_BIT |
         VK_ACCESS_HOST_READ_BIT |
         VK_ACCESS_HOST_WRITE_BIT;
 
-    if (DeviceCI.pEnabledFeatures->geometryShader)
+    if (m_EnabledFeatures.geometryShader)
         GraphicsStages |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
-    if (DeviceCI.pEnabledFeatures->tessellationShader)
+    if (m_EnabledFeatures.tessellationShader)
         GraphicsStages |= VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
     if (m_EnabledExtFeatures.MeshShader.meshShader != VK_FALSE && m_EnabledExtFeatures.MeshShader.taskShader != VK_FALSE)
         GraphicsStages |= VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
@@ -118,14 +110,14 @@ VulkanLogicalDevice::VulkanLogicalDevice(const VulkanPhysicalDevice&  PhysicalDe
         GraphicsAccessMask |= VK_ACCESS_FRAGMENT_DENSITY_MAP_READ_BIT_EXT;
     }
 
-    const auto QueueCount = PhysicalDevice.GetQueueProperties().size();
+    const size_t QueueCount = CI.PhysicalDevice.GetQueueProperties().size();
     m_SupportedStagesMask.resize(QueueCount, 0);
     m_SupportedAccessMask.resize(QueueCount, 0);
     for (size_t q = 0; q < QueueCount; ++q)
     {
-        const auto& Queue      = PhysicalDevice.GetQueueProperties()[q];
-        auto&       StageMask  = m_SupportedStagesMask[q];
-        auto&       AccessMask = m_SupportedAccessMask[q];
+        const VkQueueFamilyProperties& Queue      = CI.PhysicalDevice.GetQueueProperties()[q];
+        VkPipelineStageFlags&          StageMask  = m_SupportedStagesMask[q];
+        VkAccessFlags&                 AccessMask = m_SupportedAccessMask[q];
 
         if (Queue.queueFlags & VK_QUEUE_GRAPHICS_BIT)
         {
@@ -158,7 +150,7 @@ VkQueue VulkanLogicalDevice::GetQueue(HardwareQueueIndex queueFamilyIndex, uint3
 
 void VulkanLogicalDevice::WaitIdle() const
 {
-    auto err = vkDeviceWaitIdle(m_VkDevice);
+    VkResult err = vkDeviceWaitIdle(m_VkDevice);
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to idle device");
     (void)err;
 }
@@ -177,7 +169,7 @@ VulkanObjectWrapper<VkObjectType, VkTypeId> VulkanLogicalDevice::CreateVulkanObj
 
     VkObjectType VkObject = VK_NULL_HANDLE;
 
-    auto err = VkCreateObject(m_VkDevice, &CreateInfo, m_VkAllocator, &VkObject);
+    VkResult err = VkCreateObject(m_VkDevice, &CreateInfo, m_VkAllocator, &VkObject);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to create Vulkan ", ObjectType, " '", DebugName, '\'');
 
     if (*DebugName != 0)
@@ -261,7 +253,7 @@ DeviceMemoryWrapper VulkanLogicalDevice::AllocateDeviceMemory(const VkMemoryAllo
 
     VkDeviceMemory vkDeviceMem = VK_NULL_HANDLE;
 
-    auto err = vkAllocateMemory(m_VkDevice, &AllocInfo, m_VkAllocator, &vkDeviceMem);
+    VkResult err = vkAllocateMemory(m_VkDevice, &AllocInfo, m_VkAllocator, &vkDeviceMem);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to allocate device memory '", DebugName, '\'');
 
     if (*DebugName != 0)
@@ -281,7 +273,7 @@ PipelineWrapper VulkanLogicalDevice::CreateComputePipeline(const VkComputePipeli
 
     VkPipeline vkPipeline = VK_NULL_HANDLE;
 
-    auto err = vkCreateComputePipelines(m_VkDevice, cache, 1, &PipelineCI, m_VkAllocator, &vkPipeline);
+    VkResult err = vkCreateComputePipelines(m_VkDevice, cache, 1, &PipelineCI, m_VkAllocator, &vkPipeline);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to create compute pipeline '", DebugName, '\'');
 
     if (*DebugName != 0)
@@ -301,7 +293,7 @@ PipelineWrapper VulkanLogicalDevice::CreateGraphicsPipeline(const VkGraphicsPipe
 
     VkPipeline vkPipeline = VK_NULL_HANDLE;
 
-    auto err = vkCreateGraphicsPipelines(m_VkDevice, cache, 1, &PipelineCI, m_VkAllocator, &vkPipeline);
+    VkResult err = vkCreateGraphicsPipelines(m_VkDevice, cache, 1, &PipelineCI, m_VkAllocator, &vkPipeline);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to create graphics pipeline '", DebugName, '\'');
 
     if (*DebugName != 0)
@@ -320,7 +312,7 @@ PipelineWrapper VulkanLogicalDevice::CreateRayTracingPipeline(const VkRayTracing
 
     VkPipeline vkPipeline = VK_NULL_HANDLE;
 
-    auto err = vkCreateRayTracingPipelinesKHR(m_VkDevice, VK_NULL_HANDLE, cache, 1, &PipelineCI, m_VkAllocator, &vkPipeline);
+    VkResult err = vkCreateRayTracingPipelinesKHR(m_VkDevice, VK_NULL_HANDLE, cache, 1, &PipelineCI, m_VkAllocator, &vkPipeline);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to create ray tracing pipeline '", DebugName, '\'');
 
     if (*DebugName != 0)
@@ -411,7 +403,7 @@ VkCommandBuffer VulkanLogicalDevice::AllocateVkCommandBuffer(const VkCommandBuff
 
     VkCommandBuffer CmdBuff = VK_NULL_HANDLE;
 
-    auto err = vkAllocateCommandBuffers(m_VkDevice, &AllocInfo, &CmdBuff);
+    VkResult err = vkAllocateCommandBuffers(m_VkDevice, &AllocInfo, &CmdBuff);
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to allocate command buffer '", DebugName, '\'');
     (void)err;
 
@@ -431,7 +423,7 @@ VkDescriptorSet VulkanLogicalDevice::AllocateVkDescriptorSet(const VkDescriptorS
 
     VkDescriptorSet DescrSet = VK_NULL_HANDLE;
 
-    auto err = vkAllocateDescriptorSets(m_VkDevice, &AllocInfo, &DescrSet);
+    VkResult err = vkAllocateDescriptorSets(m_VkDevice, &AllocInfo, &DescrSet);
     if (err != VK_SUCCESS)
         return VK_NULL_HANDLE;
 
@@ -654,7 +646,7 @@ VkResult VulkanLogicalDevice::GetFenceStatus(VkFence fence) const
 
 VkResult VulkanLogicalDevice::ResetFence(VkFence fence) const
 {
-    auto err = vkResetFences(m_VkDevice, 1, &fence);
+    VkResult err = vkResetFences(m_VkDevice, 1, &fence);
     DEV_CHECK_ERR(err == VK_SUCCESS, "vkResetFences() failed");
     return err;
 }
@@ -710,7 +702,7 @@ void VulkanLogicalDevice::UpdateDescriptorSets(uint32_t                    descr
 VkResult VulkanLogicalDevice::ResetCommandPool(VkCommandPool           vkCmdPool,
                                                VkCommandPoolResetFlags flags) const
 {
-    auto err = vkResetCommandPool(m_VkDevice, vkCmdPool, flags);
+    VkResult err = vkResetCommandPool(m_VkDevice, vkCmdPool, flags);
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to reset command pool");
     return err;
 }
@@ -718,7 +710,7 @@ VkResult VulkanLogicalDevice::ResetCommandPool(VkCommandPool           vkCmdPool
 VkResult VulkanLogicalDevice::ResetDescriptorPool(VkDescriptorPool           vkDescriptorPool,
                                                   VkDescriptorPoolResetFlags flags) const
 {
-    auto err = vkResetDescriptorPool(m_VkDevice, vkDescriptorPool, flags);
+    VkResult err = vkResetDescriptorPool(m_VkDevice, vkDescriptorPool, flags);
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to reset descriptor pool");
     return err;
 }
@@ -734,6 +726,29 @@ void VulkanLogicalDevice::ResetQueryPool(VkQueryPool queryPool,
 #endif
 }
 
+VkResult VulkanLogicalDevice::CopyMemoryToImage(const VkCopyMemoryToImageInfoEXT& CopyInfo) const
+{
+#if DILIGENT_USE_VOLK
+    VkResult err = vkCopyMemoryToImageEXT(m_VkDevice, &CopyInfo);
+    DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to copy memory to image");
+    return err;
+#else
+    UNSUPPORTED("Host image copy is not supported when vulkan library is linked statically");
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+#endif
+}
+
+VkResult VulkanLogicalDevice::HostTransitionImageLayout(const VkHostImageLayoutTransitionInfoEXT& TransitionInfo) const
+{
+#if DILIGENT_USE_VOLK
+    VkResult err = vkTransitionImageLayoutEXT(m_VkDevice, 1, &TransitionInfo);
+    DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to transition image layout");
+    return err;
+#else
+    UNSUPPORTED("Host image layout transition is not supported when vulkan library is linked statically");
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+#endif
+}
 
 VkResult VulkanLogicalDevice::GetRayTracingShaderGroupHandles(VkPipeline pipeline, uint32_t firstGroup, uint32_t groupCount, size_t dataSize, void* pData) const
 {

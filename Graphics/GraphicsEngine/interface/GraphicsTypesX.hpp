@@ -277,6 +277,11 @@ struct RenderPassDescX
         RenderPassDescX{static_cast<const RenderPassDesc&>(_DescX)}
     {}
 
+    explicit RenderPassDescX(const char* Name)
+    {
+        SetName(Name);
+    }
+
     RenderPassDescX& operator=(const RenderPassDescX& _DescX)
     {
         RenderPassDescX Copy{_DescX};
@@ -286,6 +291,13 @@ struct RenderPassDescX
 
     RenderPassDescX(RenderPassDescX&&) noexcept = default;
     RenderPassDescX& operator=(RenderPassDescX&&) noexcept = default;
+
+    RenderPassDescX& SetName(const char* Name)
+    {
+        m_Name    = Name != nullptr ? Name : "";
+        Desc.Name = Name != nullptr ? m_Name.c_str() : nullptr;
+        return *this;
+    }
 
     RenderPassDescX& AddAttachment(const RenderPassAttachmentDesc& Attachment)
     {
@@ -375,6 +387,7 @@ private:
     }
 
     RenderPassDesc Desc;
+    std::string    m_Name;
 
     std::vector<RenderPassAttachmentDesc> Attachments;
     std::vector<SubpassDesc>              Subpasses;
@@ -1544,6 +1557,14 @@ struct GraphicsPipelineStateCreateInfoX : PipelineStateCreateInfoX<GraphicsPipel
         return *this;
     }
 
+    GraphicsPipelineStateCreateInfoX& ClearRenderTargets() noexcept
+    {
+        GraphicsPipeline.NumRenderTargets = 0;
+        for (size_t i = 0; i < MAX_RENDER_TARGETS; ++i)
+            GraphicsPipeline.RTVFormats[i] = TEX_FORMAT_UNKNOWN;
+        return *this;
+    }
+
     GraphicsPipelineStateCreateInfoX& SetDepthFormat(TEXTURE_FORMAT DSVFormat) noexcept
     {
         GraphicsPipeline.DSVFormat = DSVFormat;
@@ -1727,6 +1748,14 @@ struct TilePipelineStateCreateInfoX : PipelineStateCreateInfoX<TilePipelineState
     {
         VERIFY_EXPR(TilePipeline.NumRenderTargets < MAX_RENDER_TARGETS);
         TilePipeline.RTVFormats[TilePipeline.NumRenderTargets++] = RTVFormat;
+        return *this;
+    }
+
+    TilePipelineStateCreateInfoX& ClearRenderTargets() noexcept
+    {
+        TilePipeline.NumRenderTargets = 0;
+        for (size_t i = 0; i < MAX_RENDER_TARGETS; ++i)
+            TilePipeline.RTVFormats[i] = TEX_FORMAT_UNKNOWN;
         return *this;
     }
 

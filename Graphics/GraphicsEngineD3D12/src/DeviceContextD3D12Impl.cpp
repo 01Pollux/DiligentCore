@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -65,10 +65,9 @@ static std::string GetContextObjectName(const char* Object, bool bIsDeferred, Ui
     return ss.str();
 }
 
-DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*          pRefCounters,
-                                               RenderDeviceD3D12Impl*       pDeviceD3D12Impl,
-                                               const EngineD3D12CreateInfo& EngineCI,
-                                               const DeviceContextDesc&     Desc) :
+DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*      pRefCounters,
+                                               RenderDeviceD3D12Impl*   pDeviceD3D12Impl,
+                                               const DeviceContextDesc& Desc) :
     // clang-format off
     TDeviceContextBase
     {
@@ -80,20 +79,20 @@ DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*          pRef
     {
         pDeviceD3D12Impl->GetDynamicMemoryManager(),
         GetContextObjectName("Dynamic heap", Desc.IsDeferred, Desc.ContextId),
-        EngineCI.DynamicHeapPageSize
+        pDeviceD3D12Impl->GetProperties().DynamicHeapPageSize
     },
     m_DynamicGPUDescriptorAllocator
     {
         {
             GetRawAllocator(),
             pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV),
-            EngineCI.DynamicDescriptorAllocationChunkSize[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV],
+            pDeviceD3D12Impl->GetProperties().DynamicDescriptorAllocationChunkSize[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV],
             GetContextObjectName("CBV_SRV_UAV dynamic descriptor allocator", Desc.IsDeferred, Desc.ContextId)
         },
         {
             GetRawAllocator(),
             pDeviceD3D12Impl->GetGPUDescriptorHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER),
-            EngineCI.DynamicDescriptorAllocationChunkSize[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER],
+            pDeviceD3D12Impl->GetProperties().DynamicDescriptorAllocationChunkSize[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER],
             GetContextObjectName("SAMPLER     dynamic descriptor allocator", Desc.IsDeferred, Desc.ContextId)
         }
     },
@@ -101,18 +100,18 @@ DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*          pRef
     m_NullRTV{pDeviceD3D12Impl->AllocateDescriptors(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1)}
 // clang-format on
 {
-    auto* pd3d12Device = pDeviceD3D12Impl->GetD3D12Device();
+    ID3D12Device* pd3d12Device = pDeviceD3D12Impl->GetD3D12Device();
     if (!IsDeferred())
     {
         RequestCommandContext();
         m_QueryMgr = &pDeviceD3D12Impl->GetQueryMgr(GetCommandQueueId());
     }
 
-    auto* pDrawIndirectSignature = GetDrawIndirectSignature(sizeof(UINT) * 4);
+    ID3D12CommandSignature* pDrawIndirectSignature = GetDrawIndirectSignature(sizeof(UINT) * 4);
     if (pDrawIndirectSignature == nullptr)
         LOG_ERROR_AND_THROW("Failed to create indirect draw command signature");
 
-    auto* pDrawIndexedIndirectSignature = GetDrawIndexedIndirectSignature(sizeof(UINT) * 5);
+    ID3D12CommandSignature* pDrawIndexedIndirectSignature = GetDrawIndexedIndirectSignature(sizeof(UINT) * 5);
     if (pDrawIndexedIndirectSignature == nullptr)
         LOG_ERROR_AND_THROW("Failed to create draw indexed indirect command signature");
 
@@ -125,7 +124,7 @@ DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*          pRef
 
     CmdSignatureDesc.ByteStride = sizeof(UINT) * 3;
     IndirectArg.Type            = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-    auto hr                     = pd3d12Device->CreateCommandSignature(&CmdSignatureDesc, nullptr, __uuidof(m_pDispatchIndirectSignature), reinterpret_cast<void**>(static_cast<ID3D12CommandSignature**>(&m_pDispatchIndirectSignature)));
+    HRESULT hr                  = pd3d12Device->CreateCommandSignature(&CmdSignatureDesc, nullptr, __uuidof(m_pDispatchIndirectSignature), reinterpret_cast<void**>(static_cast<ID3D12CommandSignature**>(&m_pDispatchIndirectSignature)));
     CHECK_D3D_RESULT_THROW(hr, "Failed to create dispatch indirect command signature");
 
 #ifdef D3D12_H_HAS_MESH_SHADER
@@ -157,6 +156,8 @@ DeviceContextD3D12Impl::DeviceContextD3D12Impl(IReferenceCounters*          pRef
         pd3d12Device->CreateRenderTargetView(nullptr, &NullRTVDesc, m_NullRTV.GetCpuHandle());
         VERIFY(!m_NullRTV.IsNull(), "Failed to create null RTV");
     }
+
+    m_MappedBuffers.reserve(32);
 }
 
 DeviceContextD3D12Impl::~DeviceContextD3D12Impl()
@@ -264,16 +265,15 @@ void DeviceContextD3D12Impl::Begin(Uint32 ImmediateContextId)
 
 void DeviceContextD3D12Impl::SetPipelineState(IPipelineState* pPipelineState)
 {
-    RefCntAutoPtr<PipelineStateD3D12Impl> pPipelineStateD3D12{pPipelineState, PipelineStateD3D12Impl::IID_InternalImpl};
-    VERIFY(pPipelineState == nullptr || pPipelineStateD3D12 != nullptr, "Unknown pipeline state object implementation");
-    if (PipelineStateD3D12Impl::IsSameObject(m_pPipelineState, pPipelineStateD3D12))
+    RefCntAutoPtr<PipelineStateD3D12Impl> pOldPipeline = m_pPipelineState;
+    if (!TDeviceContextBase::SetPipelineState(pPipelineState, PipelineStateD3D12Impl::IID_InternalImpl))
         return;
 
-    const auto& PSODesc = pPipelineStateD3D12->GetDesc();
+    const PipelineStateDesc& PSODesc = m_pPipelineState->GetDesc();
 
     bool CommitStates  = false;
     bool CommitScissor = false;
-    if (!m_pPipelineState)
+    if (!pOldPipeline)
     {
         // If no pipeline state is bound, we are working with the fresh command
         // list. We have to commit the states set in the context that are not
@@ -282,7 +282,7 @@ void DeviceContextD3D12Impl::SetPipelineState(IPipelineState* pPipelineState)
     }
     else
     {
-        const auto& OldPSODesc = m_pPipelineState->GetDesc();
+        const PipelineStateDesc& OldPSODesc = pOldPipeline->GetDesc();
         // Commit all graphics states when switching from compute pipeline
         // This is necessary because if the command list had been flushed
         // and the first PSO set on the command list was a compute pipeline,
@@ -290,14 +290,13 @@ void DeviceContextD3D12Impl::SetPipelineState(IPipelineState* pPipelineState)
         CommitStates = !OldPSODesc.IsAnyGraphicsPipeline();
         // We also need to update scissor rect if ScissorEnable state has changed
         if (OldPSODesc.IsAnyGraphicsPipeline() && PSODesc.IsAnyGraphicsPipeline())
-            CommitScissor = m_pPipelineState->GetGraphicsPipelineDesc().RasterizerDesc.ScissorEnable != pPipelineStateD3D12->GetGraphicsPipelineDesc().RasterizerDesc.ScissorEnable;
+            CommitScissor = pOldPipeline->GetGraphicsPipelineDesc().RasterizerDesc.ScissorEnable != m_pPipelineState->GetGraphicsPipelineDesc().RasterizerDesc.ScissorEnable;
+        pOldPipeline.Release();
     }
 
-    TDeviceContextBase::SetPipelineState(std::move(pPipelineStateD3D12), 0 /*Dummy*/);
-
-    auto& CmdCtx        = GetCmdContext();
-    auto& RootInfo      = GetRootTableInfo(PSODesc.PipelineType);
-    auto* pd3d12RootSig = m_pPipelineState->GetD3D12RootSignature();
+    CommandContext&      CmdCtx        = GetCmdContext();
+    RootTableInfo&       RootInfo      = GetRootTableInfo(PSODesc.PipelineType);
+    ID3D12RootSignature* pd3d12RootSig = m_pPipelineState->GetD3D12RootSignature();
 
     if (RootInfo.pd3d12RootSig != pd3d12RootSig)
     {
@@ -316,15 +315,15 @@ void DeviceContextD3D12Impl::SetPipelineState(IPipelineState* pPipelineState)
         case PIPELINE_TYPE_GRAPHICS:
         case PIPELINE_TYPE_MESH:
         {
-            auto& GraphicsPipeline = m_pPipelineState->GetGraphicsPipelineDesc();
-            auto& GraphicsCtx      = CmdCtx.AsGraphicsContext();
-            auto* pd3d12PSO        = m_pPipelineState->GetD3D12PipelineState();
+            const GraphicsPipelineDesc& GraphicsPipeline = m_pPipelineState->GetGraphicsPipelineDesc();
+            GraphicsContext&            GraphicsCtx      = CmdCtx.AsGraphicsContext();
+            ID3D12PipelineState*        pd3d12PSO        = m_pPipelineState->GetD3D12PipelineState();
             GraphicsCtx.SetPipelineState(pd3d12PSO);
             GraphicsCtx.SetGraphicsRootSignature(pd3d12RootSig);
 
             if (PSODesc.PipelineType == PIPELINE_TYPE_GRAPHICS)
             {
-                auto D3D12Topology = TopologyToD3D12Topology(GraphicsPipeline.PrimitiveTopology);
+                D3D12_PRIMITIVE_TOPOLOGY D3D12Topology = TopologyToD3D12Topology(GraphicsPipeline.PrimitiveTopology);
                 GraphicsCtx.SetPrimitiveTopology(D3D12Topology);
             }
 
@@ -347,16 +346,16 @@ void DeviceContextD3D12Impl::SetPipelineState(IPipelineState* pPipelineState)
         }
         case PIPELINE_TYPE_COMPUTE:
         {
-            auto* pd3d12PSO = m_pPipelineState->GetD3D12PipelineState();
-            auto& CompCtx   = CmdCtx.AsComputeContext();
+            ID3D12PipelineState* pd3d12PSO = m_pPipelineState->GetD3D12PipelineState();
+            ComputeContext&      CompCtx   = CmdCtx.AsComputeContext();
             CompCtx.SetPipelineState(pd3d12PSO);
             CompCtx.SetComputeRootSignature(pd3d12RootSig);
             break;
         }
         case PIPELINE_TYPE_RAY_TRACING:
         {
-            auto* pd3d12SO = m_pPipelineState->GetD3D12StateObject();
-            auto& RTCtx    = CmdCtx.AsGraphicsContext4();
+            ID3D12StateObject* pd3d12SO = m_pPipelineState->GetD3D12StateObject();
+            GraphicsContext4&  RTCtx    = CmdCtx.AsGraphicsContext4();
             RTCtx.SetRayTracingPipelineState(pd3d12SO);
             RTCtx.SetComputeRootSignature(pd3d12RootSig);
             break;
@@ -378,8 +377,8 @@ void DeviceContextD3D12Impl::CommitRootTablesAndViews(RootTableInfo& RootInfo, U
         {
             m_pDevice->GetD3D12Device(),
             CmdCtx,
-            GetContextId(),
-            IsCompute //
+            this,
+            IsCompute,
         };
 
     VERIFY(CommitSRBMask != 0, "This method should not be called when there is nothing to commit");
@@ -510,7 +509,7 @@ void DeviceContextD3D12Impl::CommitD3D12IndexBuffer(GraphicsContext& GraphCtx, V
     DEV_CHECK_ERR(m_pIndexBuffer != nullptr, "Index buffer is not set up for indexed draw command");
 
     D3D12_INDEX_BUFFER_VIEW IBView;
-    IBView.BufferLocation = m_pIndexBuffer->GetGPUAddress(GetContextId(), this) + m_IndexDataStartOffset;
+    IBView.BufferLocation = GetBufferGPUAddress(m_pIndexBuffer) + m_IndexDataStartOffset;
     if (IndexType == VT_UINT32)
         IBView.Format = DXGI_FORMAT_R32_UINT;
     else
@@ -531,7 +530,7 @@ void DeviceContextD3D12Impl::CommitD3D12IndexBuffer(GraphicsContext& GraphCtx, V
     bool IsDynamic = m_pIndexBuffer->GetDesc().Usage == USAGE_DYNAMIC;
 #ifdef DILIGENT_DEVELOPMENT
     if (IsDynamic)
-        m_pIndexBuffer->DvpVerifyDynamicAllocation(this);
+        DvpVerifyDynamicAllocation(m_pIndexBuffer);
 #endif
 
     Uint64 BuffDataStartByteOffset;
@@ -572,7 +571,7 @@ void DeviceContextD3D12Impl::CommitD3D12VertexBuffers(GraphicsContext& GraphCtx)
             {
                 DynamicBufferPresent = true;
 #ifdef DILIGENT_DEVELOPMENT
-                pBufferD3D12->DvpVerifyDynamicAllocation(this);
+                DvpVerifyDynamicAllocation(pBufferD3D12);
 #endif
             }
 
@@ -581,7 +580,7 @@ void DeviceContextD3D12Impl::CommitD3D12VertexBuffers(GraphicsContext& GraphCtx)
             // so there is no need to reference the resource here
             //GraphicsCtx.AddReferencedObject(pd3d12Resource);
 
-            VBView.BufferLocation = pBufferD3D12->GetGPUAddress(GetContextId(), this) + CurrStream.Offset;
+            VBView.BufferLocation = GetBufferGPUAddress(pBufferD3D12) + CurrStream.Offset;
             VBView.StrideInBytes  = m_pPipelineState->GetBufferStride(Buff);
             // Note that for a dynamic buffer, what we use here is the size of the buffer itself, not the upload heap buffer!
             VBView.SizeInBytes = StaticCast<UINT>(pBufferD3D12->GetDesc().Size - CurrStream.Offset);
@@ -603,8 +602,7 @@ void DeviceContextD3D12Impl::CommitD3D12VertexBuffers(GraphicsContext& GraphCtx)
 void DeviceContextD3D12Impl::PrepareForDraw(GraphicsContext& GraphCtx, DRAW_FLAGS Flags)
 {
 #ifdef DILIGENT_DEVELOPMENT
-    if ((Flags & DRAW_FLAG_VERIFY_RENDER_TARGETS) != 0)
-        DvpVerifyRenderTargets();
+    DvpVerifyRenderTargets();
 #endif
 
     if (!m_State.bCommittedD3D12VBsUpToDate && m_pPipelineState->GetNumBufferSlotsUsed() > 0)
@@ -743,7 +741,7 @@ void DeviceContextD3D12Impl::PrepareIndirectAttribsBuffer(CommandContext&       
     auto* pIndirectDrawAttribsD3D12 = ClassPtrCast<BufferD3D12Impl>(pAttribsBuffer);
 #ifdef DILIGENT_DEVELOPMENT
     if (pIndirectDrawAttribsD3D12->GetDesc().Usage == USAGE_DYNAMIC)
-        pIndirectDrawAttribsD3D12->DvpVerifyDynamicAllocation(this);
+        DvpVerifyDynamicAllocation(pIndirectDrawAttribsD3D12);
 #endif
 
     TransitionOrVerifyBufferState(CmdCtx, *pIndirectDrawAttribsD3D12, BufferStateTransitionMode,
@@ -1704,9 +1702,9 @@ void DeviceContextD3D12Impl::CopyBuffer(IBuffer*                       pSrcBuffe
 void DeviceContextD3D12Impl::MapBuffer(IBuffer* pBuffer, MAP_TYPE MapType, MAP_FLAGS MapFlags, PVoid& pMappedData)
 {
     TDeviceContextBase::MapBuffer(pBuffer, MapType, MapFlags, pMappedData);
-    auto*       pBufferD3D12   = ClassPtrCast<BufferD3D12Impl>(pBuffer);
-    const auto& BuffDesc       = pBufferD3D12->GetDesc();
-    auto*       pd3d12Resource = pBufferD3D12->m_pd3d12Resource.p;
+    BufferD3D12Impl*  pBufferD3D12   = ClassPtrCast<BufferD3D12Impl>(pBuffer);
+    const BufferDesc& BuffDesc       = pBufferD3D12->GetDesc();
+    ID3D12Resource*   pd3d12Resource = pBufferD3D12->GetD3D12Resource();
 
     if (MapType == MAP_READ)
     {
@@ -1739,7 +1737,15 @@ void DeviceContextD3D12Impl::MapBuffer(IBuffer* pBuffer, MAP_TYPE MapType, MAP_F
         else if (BuffDesc.Usage == USAGE_DYNAMIC)
         {
             DEV_CHECK_ERR((MapFlags & (MAP_FLAG_DISCARD | MAP_FLAG_NO_OVERWRITE)) != 0, "D3D12 buffer must be mapped for writing with MAP_FLAG_DISCARD or MAP_FLAG_NO_OVERWRITE flag");
-            auto& DynamicData = pBufferD3D12->m_DynamicData[GetContextId()];
+
+            const Uint32 DynamicBufferId = pBufferD3D12->GetDynamicBufferId();
+            VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", BuffDesc.Name, "' does not have dynamic buffer ID");
+            if (m_MappedBuffers.size() <= DynamicBufferId)
+                m_MappedBuffers.resize(DynamicBufferId + 1);
+            D3D12DynamicAllocation& DynamicData = m_MappedBuffers[DynamicBufferId].Allocation;
+#ifdef DILIGENT_DEVELOPMENT
+            m_MappedBuffers[DynamicBufferId].DvpBufferUID = pBufferD3D12->GetUniqueID();
+#endif
             if ((MapFlags & MAP_FLAG_DISCARD) != 0 || DynamicData.CPUAddress == nullptr)
             {
                 Uint32 Alignment = (BuffDesc.BindFlags & BIND_UNIFORM_BUFFER) ? D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT : 16;
@@ -1780,9 +1786,9 @@ void DeviceContextD3D12Impl::MapBuffer(IBuffer* pBuffer, MAP_TYPE MapType, MAP_F
 void DeviceContextD3D12Impl::UnmapBuffer(IBuffer* pBuffer, MAP_TYPE MapType)
 {
     TDeviceContextBase::UnmapBuffer(pBuffer, MapType);
-    auto*       pBufferD3D12   = ClassPtrCast<BufferD3D12Impl>(pBuffer);
-    const auto& BuffDesc       = pBufferD3D12->GetDesc();
-    auto*       pd3d12Resource = pBufferD3D12->m_pd3d12Resource.p;
+    BufferD3D12Impl*  pBufferD3D12   = ClassPtrCast<BufferD3D12Impl>(pBuffer);
+    const BufferDesc& BuffDesc       = pBufferD3D12->GetDesc();
+    ID3D12Resource*   pd3d12Resource = pBufferD3D12->GetD3D12Resource();
     if (MapType == MAP_READ)
     {
         D3D12_RANGE MapRange;
@@ -1803,11 +1809,77 @@ void DeviceContextD3D12Impl::UnmapBuffer(IBuffer* pBuffer, MAP_TYPE MapType)
             // Copy data into the resource
             if (pd3d12Resource)
             {
-                UpdateBufferRegion(pBufferD3D12, pBufferD3D12->m_DynamicData[GetContextId()], 0, BuffDesc.Size, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+                const Uint32 DynamicBufferId = pBufferD3D12->GetDynamicBufferId();
+                VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", BuffDesc.Name, "' does not have dynamic buffer ID");
+                if (DynamicBufferId < m_MappedBuffers.size())
+                {
+                    D3D12DynamicAllocation& DynAlloc = m_MappedBuffers[DynamicBufferId].Allocation;
+                    UpdateBufferRegion(pBufferD3D12, DynAlloc, 0, BuffDesc.Size, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+                }
+                else
+                {
+                    DEV_ERROR("Unmapping buffer '", BuffDesc.Name, "' that was not previously mapped.");
+                }
             }
         }
     }
 }
+
+ID3D12Resource* DeviceContextD3D12Impl::GetDynamicBufferD3D12ResourceAndOffset(const BufferD3D12Impl* pBuffer, Uint64& DataStartByteOffset)
+{
+    VERIFY_EXPR(pBuffer->GetDesc().Usage == USAGE_DYNAMIC);
+
+#ifdef DILIGENT_DEVELOPMENT
+    DvpVerifyDynamicAllocation(pBuffer);
+#endif
+
+    const Uint32 DynamicBufferId = pBuffer->GetDynamicBufferId();
+    VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", pBuffer->GetDesc().Name, "' does not have dynamic buffer ID");
+    if (DynamicBufferId < m_MappedBuffers.size())
+    {
+        const D3D12DynamicAllocation& Allocation{m_MappedBuffers[DynamicBufferId].Allocation};
+        DataStartByteOffset = Allocation.Offset;
+        return Allocation.pBuffer;
+    }
+    else
+    {
+        DataStartByteOffset = 0;
+        return nullptr;
+    }
+}
+
+#ifdef DILIGENT_DEVELOPMENT
+void DeviceContextD3D12Impl::DvpVerifyDynamicAllocation(const BufferD3D12Impl* pBuffer) const
+{
+    VERIFY_EXPR(pBuffer != nullptr);
+
+    if (pBuffer->GetD3D12Resource() != nullptr)
+        return;
+
+    const BufferDesc& BuffDesc = pBuffer->GetDesc();
+    VERIFY_EXPR(BuffDesc.Usage == USAGE_DYNAMIC);
+
+    const Uint32 DynamicBufferId = pBuffer->GetDynamicBufferId();
+    VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", pBuffer->GetDesc().Name, "' does not have dynamic buffer ID");
+
+    if (DynamicBufferId >= m_MappedBuffers.size())
+    {
+        DEV_ERROR("Dynamic buffer '", BuffDesc.Name, "' has not been mapped. Note: memory for dynamic buffers is allocated when a buffer is mapped.");
+        return;
+    }
+
+    const MappedBuffer& MappedBuff = m_MappedBuffers[DynamicBufferId];
+    DEV_CHECK_ERR(MappedBuff.Allocation.GPUAddress != 0, "Dynamic buffer '", BuffDesc.Name, "' has not been mapped before its first use. Context Id: ", GetContextId(),
+                  ". Note: memory for dynamic buffers is allocated when a buffer is mapped.");
+
+    DEV_CHECK_ERR(MappedBuff.Allocation.DvpCtxFrameNumber == GetFrameNumber(), "Dynamic allocation of dynamic buffer '", BuffDesc.Name, "' in frame ", GetFrameNumber(),
+                  " is out-of-date. Note: contents of all dynamic resources is discarded at the end of every frame. A buffer must be mapped before its first use in any frame.");
+
+    DEV_CHECK_ERR(MappedBuff.DvpBufferUID == pBuffer->GetUniqueID(), "Dynamic buffer ID mismatch. Buffer '", BuffDesc.Name, "' has ID ", pBuffer->GetUniqueID(), " but the ID of the mapped buffer is ",
+                  MappedBuff.DvpBufferUID, ". This indicates that dynamic space has been reassigned to a different buffer, which has not been mapped.");
+}
+#endif
+
 
 void DeviceContextD3D12Impl::UpdateTexture(ITexture*                      pTexture,
                                            Uint32                         MipLevel,

@@ -16,15 +16,15 @@ endif()
 
 FetchContent_DeclareShallowGit(
     dawn
-    GIT_REPOSITORY         https://dawn.googlesource.com/dawn
-    GIT_TAG                dff0ce002ae988d15bca9ea7f77c6352f91692d1
+    GIT_REPOSITORY  https://dawn.googlesource.com/dawn
+    GIT_TAG         db55f595741106be83b823a02ebdc58efbe997f1
 )
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if (PLATFORM_EMSCRIPTEN)
+if (PLATFORM_WEB)
     set(TINT_BUILD_AS_OTHER_OS ON CACHE BOOL "" FORCE)
 else()
     set(TINT_BUILD_AS_OTHER_OS OFF CACHE BOOL "" FORCE)
@@ -33,7 +33,7 @@ set(TINT_BUILD_SPV_READER  ON  CACHE BOOL "" FORCE)
 set(TINT_BUILD_WGSL_WRITER ON  CACHE BOOL "" FORCE)
 set(TINT_BUILD_WGSL_READER ON  CACHE BOOL "" FORCE)
 set(TINT_BUILD_IR          ON  CACHE BOOL "" FORCE)
-if (PLATFORM_EMSCRIPTEN)
+if (PLATFORM_WEB)
     set(TINT_BUILD_HLSL_WRITER OFF CACHE BOOL "" FORCE)
 else()
     set(TINT_BUILD_HLSL_WRITER ON CACHE BOOL "" FORCE)
@@ -57,7 +57,11 @@ set(DAWN_ENABLE_VULKAN     OFF CACHE BOOL "" FORCE)
 set(DAWN_ENABLE_D3D11      OFF CACHE BOOL "" FORCE)
 set(DAWN_ENABLE_DESKTOP_GL OFF CACHE BOOL "" FORCE)
 set(DAWN_ENABLE_OPENGLES   OFF CACHE BOOL "" FORCE)
-if (PLATFORM_EMSCRIPTEN)
+set(DAWN_BUILD_TESTS       OFF CACHE BOOL "" FORCE)
+# Dawn's CMake defines DAWN_EMSCRIPTEN_TOOLCHAIN through the option command, which
+# sets its default value to OFF instead of ""
+set(DAWN_EMSCRIPTEN_TOOLCHAIN "" CACHE STRING "" FORCE)
+if (PLATFORM_WEB)
     set(DAWN_ENABLE_D3D12 OFF  CACHE BOOL "" FORCE)
 else()
     set(DAWN_ENABLE_D3D12 ON CACHE BOOL "" FORCE)
@@ -72,15 +76,18 @@ set(DAWN_SPIRV_TOOLS_DIR    "${spirv-tools_SOURCE_DIR}"    CACHE STRING "Directo
 set(DAWN_SPIRV_HEADERS_DIR  "${SPIRV-Headers_SOURCE_DIR}"  CACHE STRING "Directory in which to find SPIRV-Headers"  FORCE)
 set(DAWN_ABSEIL_DIR         "${abseil-cpp_SOURCE_DIR}"     CACHE STRING "Directory in which to find Abseil"         FORCE)
 
+set(BUILD_SHARED_LIBS OFF)
+
 FetchContent_MakeAvailable(dawn)
 
-if (PLATFORM_EMSCRIPTEN)
+if (PLATFORM_WEB)
     find_targets_in_directory(DAWN_TARGETS ${dawn_SOURCE_DIR})
     set_targets_emscripten_properties(${DAWN_TARGETS})
 endif()
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(tint_api PRIVATE -Wno-switch-default)
+    target_compile_options(tint_utils_strconv PRIVATE -Wno-nullability-extension)
 endif()
 
 install(FILES "${Dawn_SOURCE_DIR}/LICENSE" DESTINATION "Licenses/ThirdParty/${DILIGENT_CORE_DIR}" RENAME dawn-License.txt)

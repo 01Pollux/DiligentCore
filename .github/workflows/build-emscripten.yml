@@ -6,7 +6,7 @@ jobs:
   build:
     strategy:
       matrix:
-        os:         ["windows-latest", "ubuntu-20.04", "macos-14"]
+        os:         ["windows-latest", "ubuntu-24.04", "macos-14"]
         build_type: ["Debug", "Release"]
 
         exclude:
@@ -17,12 +17,15 @@ jobs:
         include:
           - os:        "windows-latest"
             host_name: "Win10"
+            cmake_args: "-DDILIGENT_BUILD_CORE_TESTS=ON -DDILIGENT_EMSCRIPTEN_STRIP_DEBUG_INFO=ON"
 
-          - os:        "ubuntu-20.04"
+          - os:        "ubuntu-24.04"
             host_name: "Linux"
+            cmake_args: "-DDILIGENT_BUILD_CORE_TESTS=ON -DDILIGENT_EMSCRIPTEN_STRIP_DEBUG_INFO=ON"
 
           - os:        "macos-14"
             host_name: "MacOS"
+            cmake_args: "-DDILIGENT_BUILD_CORE_TESTS=ON -DDILIGENT_BUILD_CORE_INCLUDE_TEST=ON"
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.host_name }} -> Emscripten, ${{ matrix.build_type }}
@@ -35,17 +38,17 @@ jobs:
 
     - name: Set up build environment
       if:   success()
-      uses: DiligentGraphics/github-action/setup-build-env@v1
+      uses: DiligentGraphics/github-action/setup-build-env@v3
       with:
-        platform: Emscripten
+        platform: Web
 
     - name: Configure CMake
       if:   success()
-      uses: DiligentGraphics/github-action/configure-cmake@v1
+      uses: DiligentGraphics/github-action/configure-cmake@v3
       with:
         build-type: ${{ matrix.build_type }}
-        cmake-args: "-DDILIGENT_BUILD_CORE_INCLUDE_TEST=ON -DDILIGENT_BUILD_CORE_TESTS=ON"
+        cmake-args: ${{ matrix.cmake_args }}
 
     - name: Build
       if:   success()
-      uses: DiligentGraphics/github-action/build@v1
+      uses: DiligentGraphics/github-action/build@v3

@@ -1,5 +1,5 @@
 /*
- *  Copyright 2023-2024 Diligent Graphics LLC
+ *  Copyright 2023-2025 Diligent Graphics LLC
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -57,19 +57,15 @@ BufferWebGPUImpl::BufferWebGPUImpl(IReferenceCounters*        pRefCounters,
                                    const BufferDesc&          Desc,
                                    const BufferData*          pInitData,
                                    bool                       bIsDeviceInternal) :
-    // clang-format off
-    TBufferBase
-    {
+    TBufferBase{
         pRefCounters,
         BuffViewObjMemAllocator,
         pDevice,
         Desc,
-        bIsDeviceInternal
+        bIsDeviceInternal,
     },
-    WebGPUResourceBase{*this, Desc.Usage == USAGE_STAGING ? ((Desc.CPUAccessFlags & CPU_ACCESS_READ) ? MaxStagingReadBuffers : 1): 0},
-    m_DynamicAllocations(STD_ALLOCATOR_RAW_MEM(DynamicAllocation, GetRawAllocator(), "Allocator for vector<DynamicAllocation>")),
+    WebGPUResourceBase{*this, Desc.Usage == USAGE_STAGING ? ((Desc.CPUAccessFlags & CPU_ACCESS_READ) ? MaxStagingReadBuffers : 1) : 0},
     m_Alignment{ComputeBufferAlignment(pDevice, m_Desc)}
-// clang-format on
 {
     ValidateBufferInitData(m_Desc, pInitData);
 
@@ -82,12 +78,7 @@ BufferWebGPUImpl::BufferWebGPUImpl(IReferenceCounters*        pRefCounters,
     const bool RequiresBackingBuffer = (m_Desc.BindFlags & BIND_UNORDERED_ACCESS) != 0 || ((m_Desc.BindFlags & BIND_SHADER_RESOURCE) != 0 && m_Desc.Mode == BUFFER_MODE_FORMATTED);
     const bool InitializeBuffer      = (pInitData != nullptr && pInitData->pData != nullptr);
 
-    if (m_Desc.Usage == USAGE_DYNAMIC && !RequiresBackingBuffer)
-    {
-        size_t CtxCount = pDevice->GetNumImmediateContexts() + pDevice->GetNumDeferredContexts();
-        m_DynamicAllocations.resize(CtxCount);
-    }
-    else
+    if (m_Desc.Usage != USAGE_DYNAMIC || RequiresBackingBuffer)
     {
         if (m_Desc.Usage == USAGE_STAGING)
         {
@@ -98,7 +89,7 @@ BufferWebGPUImpl::BufferWebGPUImpl(IReferenceCounters*        pRefCounters,
         else
         {
             WGPUBufferDescriptor wgpuBufferDesc{};
-            wgpuBufferDesc.label = m_Desc.Name;
+            wgpuBufferDesc.label = GetWGPUStringView(m_Desc.Name);
             wgpuBufferDesc.size  = AlignUp(m_Desc.Size, m_Alignment);
             wgpuBufferDesc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_CopySrc;
 
@@ -156,20 +147,16 @@ BufferWebGPUImpl::BufferWebGPUImpl(IReferenceCounters*        pRefCounters,
                                    RESOURCE_STATE             InitialState,
                                    WGPUBuffer                 wgpuBuffer,
                                    bool                       bIsDeviceInternal) :
-    // clang-format off
-    TBufferBase
-    {
+    TBufferBase{
         pRefCounters,
         BuffViewObjMemAllocator,
         pDevice,
         Desc,
-        bIsDeviceInternal
+        bIsDeviceInternal,
     },
     WebGPUResourceBase{*this, 0},
     m_wgpuBuffer{wgpuBuffer, {true}},
-    m_DynamicAllocations(STD_ALLOCATOR_RAW_MEM(DynamicAllocation, GetRawAllocator(), "Allocator for vector<DynamicAllocation>")),
     m_Alignment{ComputeBufferAlignment(pDevice, Desc)}
-// clang-format on
 {
     DEV_CHECK_ERR(Desc.Usage != USAGE_STAGING, "USAGE_STAGING buffer is not expected");
 
@@ -215,16 +202,6 @@ Uint32 BufferWebGPUImpl::GetAlignment() const
     return m_Alignment;
 }
 
-const DynamicMemoryManagerWebGPU::Allocation& BufferWebGPUImpl::GetDynamicAllocation(DeviceContextIndex CtxId) const
-{
-    return m_DynamicAllocations[CtxId];
-}
-
-void BufferWebGPUImpl::SetDynamicAllocation(DeviceContextIndex CtxId, DynamicMemoryManagerWebGPU::Allocation&& Allocation)
-{
-    m_DynamicAllocations[CtxId] = std::move(Allocation);
-}
-
 BufferWebGPUImpl::StagingBufferInfo* BufferWebGPUImpl::GetStagingBuffer()
 {
     VERIFY(m_Desc.Usage == USAGE_STAGING, "USAGE_STAGING buffer is expected");
@@ -246,7 +223,7 @@ void BufferWebGPUImpl::CreateViewInternal(const BufferViewDesc& OrigViewDesc, IB
         BufferViewDesc ViewDesc = OrigViewDesc;
         ValidateAndCorrectBufferViewDesc(m_Desc, ViewDesc, pDeviceWebGPU->GetAdapterInfo().Buffer.StructuredBufferOffsetAlignment);
 
-        auto& BuffViewAllocator = pDeviceWebGPU->GetBuffViewObjAllocator();
+        FixedBlockMemoryAllocator& BuffViewAllocator = pDeviceWebGPU->GetBuffViewObjAllocator();
         VERIFY(&BuffViewAllocator == &m_dbgBuffViewAllocator, "Buffer view allocator does not match allocator provided at buffer initialization");
 
         if (ViewDesc.ViewType == BUFFER_VIEW_UNORDERED_ACCESS || ViewDesc.ViewType == BUFFER_VIEW_SHADER_RESOURCE)
@@ -257,26 +234,9 @@ void BufferWebGPUImpl::CreateViewInternal(const BufferViewDesc& OrigViewDesc, IB
     }
     catch (const std::runtime_error&)
     {
-        const auto* ViewTypeName = GetBufferViewTypeLiteralName(OrigViewDesc.ViewType);
+        const char* ViewTypeName = GetBufferViewTypeLiteralName(OrigViewDesc.ViewType);
         LOG_ERROR("Failed to create view \"", OrigViewDesc.Name ? OrigViewDesc.Name : "", "\" (", ViewTypeName, ") for buffer \"", m_Desc.Name, "\"");
     }
 }
-
-
-#ifdef DILIGENT_DEVELOPMENT
-void BufferWebGPUImpl::DvpVerifyDynamicAllocation(const DeviceContextWebGPUImpl* pCtx) const
-{
-    if (!m_wgpuBuffer)
-    {
-        VERIFY(m_Desc.Usage == USAGE_DYNAMIC, "Dynamic buffer is expected");
-
-        const DeviceContextIndex ContextId    = pCtx->GetContextId();
-        const DynamicAllocation& DynAlloc     = m_DynamicAllocations[ContextId];
-        const Uint64             CurrentFrame = pCtx->GetFrameNumber();
-        DEV_CHECK_ERR(DynAlloc, "Dynamic buffer '", m_Desc.Name, "' has not been mapped before its first use. Context Id: ", ContextId, ". Note: memory for dynamic buffers is allocated when a buffer is mapped.");
-        DEV_CHECK_ERR(DynAlloc.dvpFrameNumber == CurrentFrame, "Dynamic allocation of dynamic buffer '", m_Desc.Name, "' in frame ", CurrentFrame, " is out-of-date. Note: contents of all dynamic resources is discarded at the end of every frame. A buffer must be mapped before its first use in any frame.");
-    }
-}
-#endif
 
 } // namespace Diligent

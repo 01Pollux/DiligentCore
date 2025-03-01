@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,6 +27,7 @@
 
 #include "GPUTestingEnvironment.hpp"
 #include "TestingSwapChainBase.hpp"
+#include "GraphicsTypesX.hpp"
 
 #include "gtest/gtest.h"
 
@@ -65,10 +66,10 @@ void ComputeShaderReferenceWebGPU(ISwapChain* pSwapChain);
 
 void ComputeShaderReference(ISwapChain* pSwapChain)
 {
-    auto* pEnv    = GPUTestingEnvironment::GetInstance();
-    auto* pDevice = pEnv->GetDevice();
+    GPUTestingEnvironment* pEnv    = GPUTestingEnvironment::GetInstance();
+    IRenderDevice*         pDevice = pEnv->GetDevice();
 
-    auto deviceType = pDevice->GetDeviceInfo().Type;
+    RENDER_DEVICE_TYPE deviceType = pDevice->GetDeviceInfo().Type;
     switch (deviceType)
     {
 #if D3D11_SUPPORTED
@@ -130,15 +131,15 @@ namespace
 
 TEST(ComputeShaderTest, FillTexture)
 {
-    auto* pEnv    = GPUTestingEnvironment::GetInstance();
-    auto* pDevice = pEnv->GetDevice();
+    GPUTestingEnvironment* pEnv    = GPUTestingEnvironment::GetInstance();
+    IRenderDevice*         pDevice = pEnv->GetDevice();
     if (!pDevice->GetDeviceInfo().Features.ComputeShaders)
     {
         GTEST_SKIP() << "Compute shaders are not supported by this device";
     }
 
-    auto* pSwapChain = pEnv->GetSwapChain();
-    auto* pContext   = pEnv->GetDeviceContext();
+    ISwapChain*     pSwapChain = pEnv->GetSwapChain();
+    IDeviceContext* pContext   = pEnv->GetDeviceContext();
 
     GPUTestingEnvironment::ScopedReset EnvironmentAutoReset;
 
@@ -173,7 +174,7 @@ TEST(ComputeShaderTest, FillTexture)
     pDevice->CreateComputePipelineState(PSOCreateInfo, &pPSO);
     ASSERT_NE(pPSO, nullptr);
 
-    const auto& SCDesc = pSwapChain->GetDesc();
+    const SwapChainDesc& SCDesc = pSwapChain->GetDesc();
 
     pPSO->GetStaticVariableByName(SHADER_TYPE_COMPUTE, "g_tex2DUAV")->Set(pTestingSwapChain->GetCurrentBackBufferUAV());
 
@@ -195,15 +196,15 @@ TEST(ComputeShaderTest, FillTexture)
 // Test that GenerateMips does not mess up compute pipeline in D3D12
 TEST(ComputeShaderTest, GenerateMips_CSInterference)
 {
-    auto* pEnv    = GPUTestingEnvironment::GetInstance();
-    auto* pDevice = pEnv->GetDevice();
+    GPUTestingEnvironment* pEnv    = GPUTestingEnvironment::GetInstance();
+    IRenderDevice*         pDevice = pEnv->GetDevice();
     if (!pDevice->GetDeviceInfo().Features.ComputeShaders)
     {
         GTEST_SKIP() << "Compute shaders are not supported by this device";
     }
 
-    auto* pSwapChain = pEnv->GetSwapChain();
-    auto* pContext   = pEnv->GetDeviceContext();
+    ISwapChain*     pSwapChain = pEnv->GetSwapChain();
+    IDeviceContext* pContext   = pEnv->GetDeviceContext();
 
     GPUTestingEnvironment::ScopedReset EnvironmentAutoReset;
 
@@ -240,7 +241,7 @@ TEST(ComputeShaderTest, GenerateMips_CSInterference)
     pDevice->CreateComputePipelineState(PSOCreateInfo, &pPSO);
     ASSERT_NE(pPSO, nullptr);
 
-    const auto& SCDesc = pSwapChain->GetDesc();
+    const SwapChainDesc& SCDesc = pSwapChain->GetDesc();
 
     RefCntAutoPtr<ITexture> pWhiteTex;
     {
@@ -294,21 +295,18 @@ TEST(ComputeShaderTest, GenerateMips_CSInterference)
 
 static void TestFillTexturePS(bool UseRenderPass)
 {
-    auto* pEnv    = GPUTestingEnvironment::GetInstance();
-    auto* pDevice = pEnv->GetDevice();
-    if (!pDevice->GetDeviceInfo().Features.ComputeShaders)
+    GPUTestingEnvironment*  pEnv       = GPUTestingEnvironment::GetInstance();
+    IRenderDevice*          pDevice    = pEnv->GetDevice();
+    const RenderDeviceInfo& DeviceInfo = pDevice->GetDeviceInfo();
+    if (!DeviceInfo.Features.ComputeShaders)
     {
         GTEST_SKIP() << "Compute shaders are not supported by this device";
     }
-    if (pDevice->GetDeviceInfo().IsWebGPUDevice())
-    {
-        GTEST_SKIP() << "WebGPU does not support render passes without attachments (https://github.com/gpuweb/gpuweb/issues/503)";
-    }
 
-    auto* pSwapChain = pEnv->GetSwapChain();
-    auto* pContext   = pEnv->GetDeviceContext();
+    ISwapChain*     pSwapChain = pEnv->GetSwapChain();
+    IDeviceContext* pContext   = pEnv->GetDeviceContext();
 
-    const auto& SCDesc = pSwapChain->GetDesc();
+    const SwapChainDesc& SCDesc = pSwapChain->GetDesc();
 
     GPUTestingEnvironment::ScopedReset EnvironmentAutoReset;
 
@@ -316,6 +314,15 @@ static void TestFillTexturePS(bool UseRenderPass)
     if (!pTestingSwapChain)
     {
         GTEST_SKIP() << "Compute shader test requires testing swap chain";
+    }
+
+    RefCntAutoPtr<ITextureView> pDummyRTV;
+    if (DeviceInfo.IsWebGPUDevice())
+    {
+        // WebGPU does not support render passes without attachments (https://github.com/gpuweb/gpuweb/issues/503)
+        RefCntAutoPtr<ITexture> pDummyTex = pEnv->CreateTexture("Dummy render target", SCDesc.ColorBufferFormat, BIND_RENDER_TARGET, SCDesc.Width, SCDesc.Height);
+        ASSERT_TRUE(pDummyTex != nullptr);
+        pDummyRTV = pDummyTex->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
     }
 
     pContext->Flush();
@@ -354,24 +361,47 @@ static void TestFillTexturePS(bool UseRenderPass)
     RefCntAutoPtr<IFramebuffer> pFramebuffer;
     if (UseRenderPass)
     {
-        SubpassDesc    Subpass;
-        RenderPassDesc RPDesc;
-        RPDesc.Name         = "Compute shader test - render pass";
-        RPDesc.pSubpasses   = &Subpass;
-        RPDesc.SubpassCount = 1;
+        RenderPassDescX RPDesc{"Compute shader test - render pass"};
+        SubpassDescX    Subpass;
+        if (DeviceInfo.IsWebGPUDevice())
+        {
+            RenderPassAttachmentDesc RTAttachment;
+            RTAttachment.Format       = SCDesc.ColorBufferFormat;
+            RTAttachment.InitialState = RESOURCE_STATE_RENDER_TARGET;
+            RTAttachment.FinalState   = RESOURCE_STATE_RENDER_TARGET;
+            RPDesc.AddAttachment(RTAttachment);
+            Subpass.AddRenderTarget({0, RESOURCE_STATE_RENDER_TARGET});
+        }
+        RPDesc.AddSubpass(Subpass);
         pDevice->CreateRenderPass(RPDesc, &pRenderPass);
         ASSERT_TRUE(pRenderPass != nullptr);
 
         PSOCreateInfo.GraphicsPipeline.pRenderPass = pRenderPass;
 
-        FramebufferDesc FBDesc;
+        FramebufferDescX FBDesc;
         FBDesc.Name           = "Compute shader test - framebuffer";
         FBDesc.pRenderPass    = pRenderPass;
         FBDesc.Width          = SCDesc.Width;
         FBDesc.Height         = SCDesc.Height;
         FBDesc.NumArraySlices = 1;
+        if (DeviceInfo.IsWebGPUDevice())
+        {
+            FBDesc.AddAttachment(pDummyRTV);
+        }
         pDevice->CreateFramebuffer(FBDesc, &pFramebuffer);
         ASSERT_TRUE(pFramebuffer != nullptr);
+    }
+    else
+    {
+        if (DeviceInfo.IsWebGPUDevice())
+        {
+            PSOCreateInfo.GraphicsPipeline.NumRenderTargets = 1;
+            PSOCreateInfo.GraphicsPipeline.RTVFormats[0]    = SCDesc.ColorBufferFormat;
+        }
+    }
+    if (DeviceInfo.IsWebGPUDevice())
+    {
+        PSOCreateInfo.GraphicsPipeline.BlendDesc.RenderTargets[0].RenderTargetWriteMask = COLOR_MASK_NONE;
     }
 
     RefCntAutoPtr<IPipelineState> pPSO;
@@ -399,7 +429,15 @@ static void TestFillTexturePS(bool UseRenderPass)
     }
     else
     {
-        pContext->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+        if (DeviceInfo.IsWebGPUDevice())
+        {
+            ITextureView* pDummyRTVs[] = {pDummyRTV};
+            pContext->SetRenderTargets(1, pDummyRTVs, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        }
+        else
+        {
+            pContext->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+        }
     }
 
     Viewport VP{SCDesc};
@@ -423,6 +461,152 @@ TEST(ComputeShaderTest, FillTexturePS)
 TEST(ComputeShaderTest, FillTexturePS_InRenderPass)
 {
     TestFillTexturePS(true);
+}
+
+TEST(ComputeShaderTest, FillTexturePS_Signatures)
+{
+    GPUTestingEnvironment*  pEnv       = GPUTestingEnvironment::GetInstance();
+    IRenderDevice*          pDevice    = pEnv->GetDevice();
+    const RenderDeviceInfo& DeviceInfo = pDevice->GetDeviceInfo();
+    if (!DeviceInfo.Features.ComputeShaders)
+    {
+        GTEST_SKIP() << "Compute shaders are not supported by this device";
+    }
+
+    ISwapChain*     pSwapChain = pEnv->GetSwapChain();
+    IDeviceContext* pContext   = pEnv->GetDeviceContext();
+
+    const SwapChainDesc& SCDesc = pSwapChain->GetDesc();
+
+    GPUTestingEnvironment::ScopedReset EnvironmentAutoReset;
+
+    RefCntAutoPtr<ITestingSwapChain> pTestingSwapChain{pSwapChain, IID_TestingSwapChain};
+    if (!pTestingSwapChain)
+    {
+        GTEST_SKIP() << "Compute shader test requires testing swap chain";
+    }
+
+    RefCntAutoPtr<ITextureView> pDummyRTV;
+    if (DeviceInfo.IsWebGPUDevice())
+    {
+        // WebGPU does not support render passes without attachments (https://github.com/gpuweb/gpuweb/issues/503)
+        RefCntAutoPtr<ITexture> pDummyTex = pEnv->CreateTexture("Dummy render target", SCDesc.ColorBufferFormat, BIND_RENDER_TARGET, SCDesc.Width, SCDesc.Height);
+        ASSERT_TRUE(pDummyTex != nullptr);
+        pDummyRTV = pDummyTex->GetDefaultView(TEXTURE_VIEW_RENDER_TARGET);
+    }
+
+    pContext->Flush();
+    pContext->InvalidateState();
+
+    ComputeShaderReference(pSwapChain);
+
+    ShaderCreateInfo ShaderCI;
+    ShaderCI.SourceLanguage = SHADER_SOURCE_LANGUAGE_HLSL;
+    ShaderCI.ShaderCompiler = pEnv->GetDefaultCompiler(ShaderCI.SourceLanguage);
+
+    ShaderCI.Desc       = {"Compute shader test - FillTextureVS", SHADER_TYPE_VERTEX, true};
+    ShaderCI.EntryPoint = "main";
+    ShaderCI.Source     = HLSL::FillTextureVS.c_str();
+    RefCntAutoPtr<IShader> pVS;
+    pDevice->CreateShader(ShaderCI, &pVS);
+    ASSERT_NE(pVS, nullptr);
+
+    ShaderCI.Desc       = {"Compute shader test - FillTexturePS", SHADER_TYPE_PIXEL, true};
+    ShaderCI.EntryPoint = "main";
+    ShaderCI.Source     = HLSL::FillTexturePS2.c_str();
+    RefCntAutoPtr<IShader> pPS;
+    pDevice->CreateShader(ShaderCI, &pPS);
+    ASSERT_NE(pPS, nullptr);
+
+    RefCntAutoPtr<IPipelineResourceSignature> pSignature0;
+    {
+        PipelineResourceSignatureDescX SignDesc{"ComputeShaderTest.FillTexturePS_InRenderPass - Signature 0"};
+        SignDesc.AddResource(SHADER_TYPE_PIXEL, "Constants", 1u, SHADER_RESOURCE_TYPE_CONSTANT_BUFFER, SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE);
+        pDevice->CreatePipelineResourceSignature(SignDesc, &pSignature0);
+        ASSERT_NE(pSignature0, nullptr);
+    }
+
+    RefCntAutoPtr<IPipelineResourceSignature> pSignature1;
+    {
+        PipelineResourceSignatureDescX SignDesc{"ComputeShaderTest.FillTexturePS_InRenderPass - Signature 1"};
+        SignDesc.AddResource(SHADER_TYPE_PIXEL, "g_tex2DUAV", 1u, SHADER_RESOURCE_TYPE_TEXTURE_UAV, SHADER_RESOURCE_VARIABLE_TYPE_MUTABLE, PIPELINE_RESOURCE_FLAG_NONE,
+                             WebGPUResourceAttribs{WEB_GPU_BINDING_TYPE_WRITE_ONLY_TEXTURE_UAV, RESOURCE_DIM_TEX_2D, TEX_FORMAT_RGBA8_UNORM});
+        SignDesc.SetBindingIndex(1);
+        pDevice->CreatePipelineResourceSignature(SignDesc, &pSignature1);
+        ASSERT_NE(pSignature1, nullptr);
+    }
+
+    GraphicsPipelineStateCreateInfoX PSOCreateInfo{"Compute shader test - output from PS"};
+
+    PSOCreateInfo.AddSignature(pSignature0);
+    PSOCreateInfo.AddSignature(pSignature1);
+
+    PSOCreateInfo.GraphicsPipeline.RasterizerDesc.CullMode      = CULL_MODE_NONE;
+    PSOCreateInfo.GraphicsPipeline.DepthStencilDesc.DepthEnable = False;
+
+    PSOCreateInfo.pVS = pVS;
+    PSOCreateInfo.pPS = pPS;
+
+    if (DeviceInfo.IsWebGPUDevice())
+    {
+        PSOCreateInfo.GraphicsPipeline.NumRenderTargets                                 = 1;
+        PSOCreateInfo.GraphicsPipeline.RTVFormats[0]                                    = SCDesc.ColorBufferFormat;
+        PSOCreateInfo.GraphicsPipeline.BlendDesc.RenderTargets[0].RenderTargetWriteMask = COLOR_MASK_NONE;
+    }
+
+    RefCntAutoPtr<IPipelineState> pPSO;
+    pDevice->CreateGraphicsPipelineState(PSOCreateInfo, &pPSO);
+    ASSERT_NE(pPSO, nullptr);
+
+    const float4 Zero{0};
+    const float4 One{1};
+
+    RefCntAutoPtr<IBuffer> pBuffer0 = pEnv->CreateBuffer({"ComputeShaderTest.FillTexturePS_InRenderPass - Buffer 0", sizeof(Zero), BIND_UNIFORM_BUFFER}, &Zero);
+    ASSERT_NE(pBuffer0, nullptr);
+    RefCntAutoPtr<IBuffer> pBuffer1 = pEnv->CreateBuffer({"ComputeShaderTest.FillTexturePS_InRenderPass - Buffer 1", sizeof(One), BIND_UNIFORM_BUFFER}, &One);
+    ASSERT_NE(pBuffer1, nullptr);
+
+    RefCntAutoPtr<IShaderResourceBinding> pSRB0[2];
+    pSignature0->CreateShaderResourceBinding(&pSRB0[0], true);
+    ASSERT_NE(pSRB0[0], nullptr);
+    pSRB0[0]->GetVariableByName(SHADER_TYPE_PIXEL, "Constants")->Set(pBuffer0);
+
+    pSignature0->CreateShaderResourceBinding(&pSRB0[1], true);
+    ASSERT_NE(pSRB0[1], nullptr);
+    pSRB0[1]->GetVariableByName(SHADER_TYPE_PIXEL, "Constants")->Set(pBuffer1);
+
+
+    RefCntAutoPtr<IShaderResourceBinding> pSRB1;
+    pSignature1->CreateShaderResourceBinding(&pSRB1, true);
+    ASSERT_NE(pSRB1, nullptr);
+    pSRB1->GetVariableByName(SHADER_TYPE_PIXEL, "g_tex2DUAV")->Set(pTestingSwapChain->GetCurrentBackBufferUAV());
+
+    ITextureView* pRTVs[] = {pSwapChain->GetCurrentBackBufferRTV()};
+    pContext->SetRenderTargets(1, pRTVs, pSwapChain->GetDepthBufferDSV(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+
+    pContext->SetPipelineState(pPSO);
+    pContext->CommitShaderResources(pSRB0[0], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    pContext->CommitShaderResources(pSRB1, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+
+    if (DeviceInfo.IsWebGPUDevice())
+    {
+        ITextureView* pDummyRTVs[] = {pDummyRTV};
+        pContext->SetRenderTargets(1, pDummyRTVs, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    }
+    else
+    {
+        pContext->SetRenderTargets(0, nullptr, nullptr, RESOURCE_STATE_TRANSITION_MODE_NONE);
+    }
+
+    Viewport VP{SCDesc};
+    pContext->SetViewports(1, &VP, SCDesc.Width, SCDesc.Height);
+
+    pContext->Draw(DrawAttribs{3, DRAW_FLAG_VERIFY_ALL});
+
+    pContext->CommitShaderResources(pSRB0[1], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    pContext->Draw(DrawAttribs{3, DRAW_FLAG_VERIFY_ALL});
+
+    pSwapChain->Present();
 }
 
 } // namespace

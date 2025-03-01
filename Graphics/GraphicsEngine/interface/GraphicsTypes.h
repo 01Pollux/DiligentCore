@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -3408,6 +3408,21 @@ struct ImmediateContextCreateInfo
 typedef struct ImmediateContextCreateInfo ImmediateContextCreateInfo;
 
 
+/// OpenXR attributes
+struct OpenXRAttribs
+{
+    /// A pointer to the xrGetInstanceProcAddr function.
+    void* GetInstanceProcAddr DEFAULT_INITIALIZER(nullptr);
+
+    /// OpenXR instance handle (XrInstance).
+	Uint64 Instance DEFAULT_INITIALIZER(0);
+
+    /// OpenXR system id (XrSystemId).
+    Uint64 SystemId DEFAULT_INITIALIZER(0);
+};
+typedef struct OpenXRAttribs OpenXRAttribs;
+
+
 /// Engine creation information
 struct EngineCreateInfo
 {
@@ -3447,6 +3462,8 @@ struct EngineCreateInfo
     /// IEngineFactoryD3D12::CreateDeviceAndContextsD3D12, and IEngineFactoryVk::CreateDeviceAndContextsVk)
     /// starting at position max(1, NumImmediateContexts).
     ///
+    /// \remarks  Additional deferred contexts may be created later by calling IRenderDevice::CreateDeferredContext().
+    /// 
     /// \warning  An application must manually call IDeviceContext::FinishFrame for
     ///           deferred contexts to let the engine release stale resources.
     Uint32                   NumDeferredContexts    DEFAULT_INITIALIZER(0);
@@ -3504,6 +3521,10 @@ struct EngineCreateInfo
     // The structure must be 8-byte aligned
     Uint32 Padding DEFAULT_INITIALIZER(0);
 
+    /// An optional pointer to the OpenXR attributes, must be set if OpenXR is used.
+    /// See Diligent::OpenXRAttribs.
+    const OpenXRAttribs *pXRAttribs DEFAULT_INITIALIZER(nullptr);
+
 #if DILIGENT_CPP_INTERFACE
     EngineCreateInfo() noexcept
     {
@@ -3527,7 +3548,7 @@ struct EngineCreateInfo
 };
 typedef struct EngineCreateInfo EngineCreateInfo;
 
-#if PLATFORM_EMSCRIPTEN
+#if PLATFORM_WEB
 /// WebGL power preference.
 DILIGENT_TYPED_ENUM(WEBGL_POWER_PREFERENCE, Uint8)
 {
@@ -3607,7 +3628,7 @@ struct EngineGLCreateInfo DILIGENT_DERIVE(EngineCreateInfo)
     /// * On Linux this affects the `DRI_PRIME` environment variable that is used by Mesa drivers that support PRIME.
     ADAPTER_TYPE PreferredAdapterType DEFAULT_INITIALIZER(ADAPTER_TYPE_UNKNOWN);
 
-#if PLATFORM_EMSCRIPTEN
+#if PLATFORM_WEB
     /// WebGL context attributes.
     WebGLContextAttribs WebGLAttribs;
 #endif
@@ -3912,8 +3933,63 @@ struct VulkanDescriptorPoolSize
 typedef struct VulkanDescriptorPoolSize VulkanDescriptorPoolSize;
 
 
+/// Vulkan-specific device features
+struct DeviceFeaturesVk
+{
+    /// Indicates whether the device supports VK_KHR_dynamic_rendering extension.
+    ///
+    /// \remarks    If the extension is not supported, dynamic render targets are implemented
+    ///             using framebuffer and render pass caches.
+    DEVICE_FEATURE_STATE DynamicRendering DEFAULT_INITIALIZER(DEVICE_FEATURE_STATE_DISABLED);
+
+    /// Indicates whether the device supports VK_EXT_host_image_copy extension.
+    ///
+    /// \remarks    This extension is used to initialize the texture on the host.
+    ///             If the extension is not supported, the texture is initialized on the device.
+    DEVICE_FEATURE_STATE HostImageCopy DEFAULT_INITIALIZER(DEVICE_FEATURE_STATE_DISABLED);
+
+
+#if DILIGENT_CPP_INTERFACE
+    constexpr DeviceFeaturesVk() noexcept {}
+
+#define ENUMERATE_VK_DEVICE_FEATURES(Handler) \
+    Handler(DynamicRendering) \
+    Handler(HostImageCopy)
+
+    explicit constexpr DeviceFeaturesVk(DEVICE_FEATURE_STATE State) noexcept
+    {
+        static_assert(sizeof(*this) == 2, "Did you add a new feature to DeviceFeatures? Please add it to ENUMERATE_VK_DEVICE_FEATURES.");
+    #define INIT_FEATURE(Feature) Feature = State;
+        ENUMERATE_VK_DEVICE_FEATURES(INIT_FEATURE)
+    #undef INIT_FEATURE
+    }
+
+    template <typename FeatType, typename HandlerType>
+    static void Enumerate(FeatType& Features, HandlerType&& Handler)
+    {
+    #define HandleFeature(Feature)                \
+        if (!Handler(#Feature, Features.Feature)) \
+            return;
+
+        ENUMERATE_VK_DEVICE_FEATURES(HandleFeature)
+
+    #undef HandleFeature
+    }
+
+    /// Comparison operator tests if two structures are equivalent
+    bool operator == (const DeviceFeatures& RHS) const
+    {
+        return memcmp(this, &RHS, sizeof(DeviceFeatures)) == 0;
+    }
+#endif
+};
+typedef struct DeviceFeaturesVk DeviceFeaturesVk;
+
 /// Attributes specific to Vulkan engine
 struct EngineVkCreateInfo DILIGENT_DERIVE(EngineCreateInfo)
+
+    /// Vulkan-specific device features, see Diligent::DeviceFeaturesVk.
+    DeviceFeaturesVk   FeaturesVk;
 
     /// The number of Vulkan instance layers in ppInstanceLayerNames array.
     Uint32             InstanceLayerCount       DEFAULT_INITIALIZER(0);
@@ -4094,7 +4170,8 @@ struct EngineVkCreateInfo DILIGENT_DERIVE(EngineCreateInfo)
     {}
 
     explicit EngineVkCreateInfo(const EngineCreateInfo &EngineCI) noexcept :
-        EngineCreateInfo{EngineCI}
+        EngineCreateInfo{EngineCI},
+        FeaturesVk{DEVICE_FEATURE_STATE_OPTIONAL}
     {}
 #endif
 };

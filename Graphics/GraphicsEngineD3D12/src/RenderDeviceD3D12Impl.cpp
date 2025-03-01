@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -69,6 +69,7 @@ D3D_FEATURE_LEVEL GetD3DFeatureLevelFromDevice(ID3D12Device* pd3d12Device)
 {
     D3D_FEATURE_LEVEL FeatureLevels[] =
         {
+            D3D_FEATURE_LEVEL_12_2,
             D3D_FEATURE_LEVEL_12_1,
             D3D_FEATURE_LEVEL_12_0,
             D3D_FEATURE_LEVEL_11_1,
@@ -141,7 +142,18 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
         EngineCI,
         AdapterInfo
     },
-    m_pd3d12Device   {pd3d12Device},
+    m_Properties
+    {
+        EngineCI.DynamicHeapPageSize,
+        [](const EngineD3D12CreateInfo& CI)
+        {
+            decltype(Properties::DynamicDescriptorAllocationChunkSize) ChunkSizeArr{};
+            for (size_t i=0; i < ChunkSizeArr.size(); ++i)
+				ChunkSizeArr[i] = CI.DynamicDescriptorAllocationChunkSize[i];
+            return ChunkSizeArr;
+        }(EngineCI),
+    },
+    m_pd3d12Device{pd3d12Device},
     m_CPUDescriptorHeaps
     {
         {RawMemAllocator, *this, EngineCI.CPUDescriptorHeapAllocationSize[0], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_DESCRIPTOR_HEAP_FLAG_NONE},
@@ -175,8 +187,13 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
         m_DeviceInfo.Features = EnableDeviceFeatures(m_AdapterInfo.Features, EngineCI.Features);
 
         auto FeatureLevel = GetD3DFeatureLevelFromDevice(m_pd3d12Device);
+#if defined(_MSC_VER) && !defined(NTDDI_WIN10_FE)
+#    pragma warning(push)
+#    pragma warning(disable : 4063)
+#endif
         switch (FeatureLevel)
         {
+            case D3D_FEATURE_LEVEL_12_2: m_DeviceInfo.APIVersion = {12, 2}; break;
             case D3D_FEATURE_LEVEL_12_1: m_DeviceInfo.APIVersion = {12, 1}; break;
             case D3D_FEATURE_LEVEL_12_0: m_DeviceInfo.APIVersion = {12, 0}; break;
             case D3D_FEATURE_LEVEL_11_1: m_DeviceInfo.APIVersion = {11, 1}; break;
@@ -185,6 +202,9 @@ RenderDeviceD3D12Impl::RenderDeviceD3D12Impl(IReferenceCounters*          pRefCo
             case D3D_FEATURE_LEVEL_10_0: m_DeviceInfo.APIVersion = {10, 0}; break;
             default: UNEXPECTED("Unexpected D3D feature level");
         }
+#if defined(_MSC_VER) && !defined(NTDDI_WIN10_FE)
+#    pragma warning(pop)
+#endif
 
         // Detect maximum  shader model.
         {
@@ -711,6 +731,11 @@ void RenderDeviceD3D12Impl::CreatePipelineStateCache(const PipelineStateCacheCre
         LOG_INFO_MESSAGE("Pipeline state cache is not supported");
         *ppPipelineStateCache = nullptr;
     }
+}
+
+void RenderDeviceD3D12Impl::CreateDeferredContext(IDeviceContext** ppDeferredContext)
+{
+    CreateDeferredContextImpl(ppDeferredContext);
 }
 
 SparseTextureFormatInfo RenderDeviceD3D12Impl::GetSparseTextureFormatInfo(TEXTURE_FORMAT     TexFormat,

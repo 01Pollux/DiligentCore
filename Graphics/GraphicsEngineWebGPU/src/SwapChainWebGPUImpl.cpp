@@ -1,5 +1,5 @@
 /*
- *  Copyright 2023-2024 Diligent Graphics LLC
+ *  Copyright 2023-2025 Diligent Graphics LLC
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@
 #    include <Windows.h>
 #endif
 
-#if PLATFORM_EMSCRIPTEN
+#if PLATFORM_WEB
 #    include <emscripten/html5.h>
 #endif
 
@@ -134,9 +134,9 @@ public:
 
         WebGPUShaderModuleWrapper wgpuVSShaderModule{};
         {
-            WGPUShaderModuleWGSLDescriptor wgpuShaderCodeDesc{};
-            wgpuShaderCodeDesc.chain.sType = WGPUSType_ShaderModuleWGSLDescriptor;
-            wgpuShaderCodeDesc.code        = VSSource;
+            WGPUShaderSourceWGSL wgpuShaderCodeDesc{};
+            wgpuShaderCodeDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
+            wgpuShaderCodeDesc.code        = GetWGPUStringView(VSSource);
 
             WGPUShaderModuleDescriptor wgpuShaderModuleDesc{};
             wgpuShaderModuleDesc.nextInChain = reinterpret_cast<WGPUChainedStruct*>(&wgpuShaderCodeDesc);
@@ -150,9 +150,9 @@ public:
 
         WebGPUShaderModuleWrapper wgpuPSShaderModule{};
         {
-            WGPUShaderModuleWGSLDescriptor wgpuShaderCodeDesc{};
-            wgpuShaderCodeDesc.chain.sType = WGPUSType_ShaderModuleWGSLDescriptor;
-            wgpuShaderCodeDesc.code        = ConvertToGamma ? PSSourceGamma : PSSource;
+            WGPUShaderSourceWGSL wgpuShaderCodeDesc{};
+            wgpuShaderCodeDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
+            wgpuShaderCodeDesc.code        = GetWGPUStringView(ConvertToGamma ? PSSourceGamma : PSSource);
 
             WGPUShaderModuleDescriptor wgpuShaderModuleDesc{};
             wgpuShaderModuleDesc.nextInChain = reinterpret_cast<WGPUChainedStruct*>(&wgpuShaderCodeDesc);
@@ -197,17 +197,17 @@ public:
 
         WGPUFragmentState wgpuFragmentState{};
         wgpuFragmentState.module      = wgpuPSShaderModule;
-        wgpuFragmentState.entryPoint  = "PSMain";
+        wgpuFragmentState.entryPoint  = GetWGPUStringView("PSMain");
         wgpuFragmentState.targets     = &wgpuColorTargetState;
         wgpuFragmentState.targetCount = 1;
 
         WGPURenderPipelineDescriptor wgpuRenderPipelineDesc{};
-        wgpuRenderPipelineDesc.label              = "SwapChainPresentPSO";
+        wgpuRenderPipelineDesc.label              = GetWGPUStringView("SwapChainPresentPSO");
         wgpuRenderPipelineDesc.layout             = m_wgpuPipelineLayout;
         wgpuRenderPipelineDesc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
         wgpuRenderPipelineDesc.primitive.cullMode = WGPUCullMode_None;
         wgpuRenderPipelineDesc.vertex.module      = wgpuVSShaderModule;
-        wgpuRenderPipelineDesc.vertex.entryPoint  = "VSMain";
+        wgpuRenderPipelineDesc.vertex.entryPoint  = GetWGPUStringView("VSMain");
         wgpuRenderPipelineDesc.fragment           = &wgpuFragmentState;
         wgpuRenderPipelineDesc.multisample.count  = 1;
         wgpuRenderPipelineDesc.multisample.mask   = 0xFFFFFFFF;
@@ -261,7 +261,7 @@ public:
 
         // Simplify this code once the bug for sRGB texture view is fixed in Dawn
         bool ConvertToGamma = false;
-#if !PLATFORM_EMSCRIPTEN
+#if !PLATFORM_WEB
         if (IsSRGBFormat(pSwapChain->GetDesc().ColorBufferFormat))
             ViewFormat = WGPUConvertUnormToSRGB(ViewFormat);
 #else
@@ -270,9 +270,9 @@ public:
         if (!InitializePipelineState(ViewFormat, ConvertToGamma))
             return WGPUSurfaceGetCurrentTextureStatus_Error;
 
-        WGPUTextureViewDescriptor wgpuTextureViewDesc;
+        WGPUTextureViewDescriptor wgpuTextureViewDesc{};
         wgpuTextureViewDesc.nextInChain     = nullptr;
-        wgpuTextureViewDesc.label           = "SwapChainPresentTextureView";
+        wgpuTextureViewDesc.label           = GetWGPUStringView("SwapChainPresentTextureView");
         wgpuTextureViewDesc.format          = ViewFormat;
         wgpuTextureViewDesc.dimension       = WGPUTextureViewDimension_2D;
         wgpuTextureViewDesc.baseMipLevel    = 0;
@@ -324,7 +324,7 @@ public:
 
         wgpuQueueSubmit(pDeviceContext->GetWebGPUQueue(), 1, &wgpuCmdBuffer.Get());
 
-#if PLATFORM_EMSCRIPTEN
+#if PLATFORM_WEB
         emscripten_request_animation_frame([](double Time, void* pUserData) -> EM_BOOL { return EM_FALSE; }, nullptr);
 #else
         wgpuSurfacePresent(pSwapChain->GetWebGPUSurface());
@@ -430,22 +430,22 @@ void SwapChainWebGPUImpl::CreateSurface()
     const RenderDeviceWebGPUImpl* pRenderDeviceWebGPU = m_pRenderDevice.RawPtr<RenderDeviceWebGPUImpl>();
 
 #if PLATFORM_WIN32
-    WGPUSurfaceDescriptorFromWindowsHWND wgpuSurfaceNativeDesc{};
-    wgpuSurfaceNativeDesc.chain     = {nullptr, WGPUSType_SurfaceDescriptorFromWindowsHWND};
+    WGPUSurfaceSourceWindowsHWND wgpuSurfaceNativeDesc{};
+    wgpuSurfaceNativeDesc.chain     = {nullptr, WGPUSType_SurfaceSourceWindowsHWND};
     wgpuSurfaceNativeDesc.hwnd      = m_NativeWindow.hWnd;
     wgpuSurfaceNativeDesc.hinstance = GetModuleHandle(nullptr);
 #elif PLATFORM_LINUX
-    WGPUSurfaceDescriptorFromXcbWindow wgpuSurfaceNativeDesc{};
-    wgpuSurfaceNativeDesc.chain = {nullptr, WGPUSType_SurfaceDescriptorFromXcbWindow};
+    WGPUSurfaceSourceXCBWindow wgpuSurfaceNativeDesc{};
+    wgpuSurfaceNativeDesc.chain = {nullptr, WGPUSType_SurfaceSourceXCBWindow};
     wgpuSurfaceNativeDesc.connection = m_NativeWindow.pXCBConnection;
     wgpuSurfaceNativeDesc.window = m_NativeWindow.WindowId;
 #elif PLATFROM_MACOS
-    WGPUSurfaceDescriptorFromMetalLayer wgpuSurfaceNativeDesc{};
-    wgpuSurfaceNativeDesc.chain  = {nullptr, WGPUSType_SurfaceDescriptorFromMetalLayer};
+    WGPUSurfaceSourceMetalLayer wgpuSurfaceNativeDesc{};
+    wgpuSurfaceNativeDesc.chain  = {nullptr, WGPUSType_SurfaceSourceMetalLayer};
     wgpuSurfaceNativeDesc.window = m_NativeWindow.MetalLayer;
-#elif PLATFORM_EMSCRIPTEN
-    WGPUSurfaceDescriptorFromCanvasHTMLSelector wgpuSurfaceNativeDesc{};
-    wgpuSurfaceNativeDesc.chain    = {nullptr, WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector};
+#elif PLATFORM_WEB
+    WGPUSurfaceSourceCanvasHTMLSelector_Emscripten wgpuSurfaceNativeDesc{};
+    wgpuSurfaceNativeDesc.chain    = {nullptr, WGPUSType_SurfaceSourceCanvasHTMLSelector_Emscripten};
     wgpuSurfaceNativeDesc.selector = m_NativeWindow.pCanvasId;
 #endif
 
@@ -496,18 +496,18 @@ void SwapChainWebGPUImpl::ConfigureSurface()
         return Result;
     };
 
-    auto SelectUsage = [&](SWAP_CHAIN_USAGE_FLAGS Flags) -> WGPUTextureUsageFlags {
-        WGPUTextureUsageFlags Result = {};
+    auto SelectUsage = [&](SWAP_CHAIN_USAGE_FLAGS Flags) -> WGPUTextureUsage {
+        WGPUTextureUsage Result = {};
 
         DEV_CHECK_ERR(Flags != 0, "No swap chain usage flags defined");
         static_assert(SWAP_CHAIN_USAGE_LAST == 8, "Please update this function to handle the new swap chain usage");
 
         if (Flags & SWAP_CHAIN_USAGE_RENDER_TARGET)
-            Result |= WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopyDst;
+            Result = static_cast<WGPUTextureUsage>(Result | WGPUTextureUsage_RenderAttachment | WGPUTextureUsage_CopyDst);
         if (Flags & SWAP_CHAIN_USAGE_SHADER_RESOURCE)
-            Result |= WGPUTextureUsage_TextureBinding;
+            Result = static_cast<WGPUTextureUsage>(Result | WGPUTextureUsage_TextureBinding);
         if (Flags & SWAP_CHAIN_USAGE_COPY_SOURCE)
-            Result |= WGPUTextureUsage_CopySrc;
+            Result = static_cast<WGPUTextureUsage>(Result | WGPUTextureUsage_CopySrc);
 
         return Result;
     };
@@ -520,7 +520,7 @@ void SwapChainWebGPUImpl::ConfigureSurface()
 
         m_SwapChainDesc.Width  = WindowRect.right - WindowRect.left;
         m_SwapChainDesc.Height = WindowRect.bottom - WindowRect.top;
-#elif PLATFORM_EMSCRIPTEN
+#elif PLATFORM_WEB
         int32_t CanvasWidth = 0;
         int32_t CanvasHeight = 0;
         emscripten_get_canvas_element_size(m_NativeWindow.pCanvasId, &CanvasWidth, &CanvasHeight);
@@ -533,7 +533,7 @@ void SwapChainWebGPUImpl::ConfigureSurface()
         m_SwapChainDesc.Height = (std::max)(m_SwapChainDesc.Height, 1u);
     }
 
-    const WGPUTextureFormat wgpuPreferredFormat = wgpuSurfaceGetPreferredFormat(m_wgpuSurface, pRenderDeviceWebGPU->GetWebGPUAdapter());
+    const WGPUTextureFormat wgpuPreferredFormat = wgpuSurfaceCapabilities.formats[0];
 
     WGPUTextureFormat wgpuRTVFormats[] = {
         wgpuPreferredFormat,
@@ -541,22 +541,16 @@ void SwapChainWebGPUImpl::ConfigureSurface()
     };
 
     WGPUSurfaceConfiguration wgpuSurfaceConfig{};
-    wgpuSurfaceConfig.nextInChain = nullptr;
-    wgpuSurfaceConfig.device      = pRenderDeviceWebGPU->GetWebGPUDevice();
-    wgpuSurfaceConfig.usage       = SelectUsage(m_SwapChainDesc.Usage);
-    wgpuSurfaceConfig.width       = m_SwapChainDesc.Width;
-    wgpuSurfaceConfig.height      = m_SwapChainDesc.Height;
-    wgpuSurfaceConfig.format      = wgpuSurfaceGetPreferredFormat(m_wgpuSurface, pRenderDeviceWebGPU->GetWebGPUAdapter());
-    wgpuSurfaceConfig.presentMode = SelectPresentMode(m_VSyncEnabled);
-    wgpuSurfaceConfig.alphaMode   = WGPUCompositeAlphaMode_Auto;
-
-    // https://github.com/emscripten-core/emscripten/blob/20800de9644315f075e27c8a67dd811b4ec8884a/src/library_webgpu.js#L2749
-#if !PLATFORM_EMSCRIPTEN
+    wgpuSurfaceConfig.nextInChain     = nullptr;
+    wgpuSurfaceConfig.device          = pRenderDeviceWebGPU->GetWebGPUDevice();
+    wgpuSurfaceConfig.usage           = SelectUsage(m_SwapChainDesc.Usage);
+    wgpuSurfaceConfig.width           = m_SwapChainDesc.Width;
+    wgpuSurfaceConfig.height          = m_SwapChainDesc.Height;
+    wgpuSurfaceConfig.format          = wgpuPreferredFormat;
+    wgpuSurfaceConfig.presentMode     = SelectPresentMode(m_VSyncEnabled);
+    wgpuSurfaceConfig.alphaMode       = WGPUCompositeAlphaMode_Auto;
     wgpuSurfaceConfig.viewFormats     = wgpuRTVFormats;
     wgpuSurfaceConfig.viewFormatCount = _countof(wgpuRTVFormats);
-#else
-    (void)wgpuRTVFormats;
-#endif
 
     wgpuSurfaceConfigure(m_wgpuSurface, &wgpuSurfaceConfig);
     wgpuSurfaceCapabilitiesFreeMembers(wgpuSurfaceCapabilities);

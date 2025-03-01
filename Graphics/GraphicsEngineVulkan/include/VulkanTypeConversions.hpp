@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2022 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -112,6 +112,9 @@ DeviceFeatures VkFeaturesToDeviceFeatures(uint32_t                              
                                           const VulkanUtilities::VulkanPhysicalDevice::ExtensionProperties& ExtProps,
                                           DEVICE_FEATURE_STATE                                              OptionalState = DEVICE_FEATURE_STATE_ENABLED);
 
+DeviceFeaturesVk PhysicalDeviceFeaturesToDeviceFeaturesVk(const VulkanUtilities::VulkanPhysicalDevice::ExtensionFeatures& ExtFeatures,
+                                                          DEVICE_FEATURE_STATE                                            OptionalState = DEVICE_FEATURE_STATE_ENABLED);
+
 SPARSE_TEXTURE_FLAGS VkSparseImageFormatFlagsToSparseTextureFlags(VkSparseImageFormatFlags Flags);
 
 VkImageUsageFlags BindFlagsToVkImageUsage(BIND_FLAGS Flags, bool IsMemoryless, bool FragDensityMapInsteadOfShadingRate);
@@ -122,5 +125,10 @@ void GetAllowedStagesAndAccessMask(BIND_FLAGS Flags, VkPipelineStageFlags& Stage
 
 VkComponentSwizzle TextureComponentSwizzleToVkComponentSwizzle(TEXTURE_COMPONENT_SWIZZLE Swizzle);
 VkComponentMapping TextureComponentMappingToVkComponentMapping(const TextureComponentMapping& Mapping);
+
+VkPipelineRenderingCreateInfoKHR GraphicsPipelineDesc_To_VkPipelineRenderingCreateInfo(const GraphicsPipelineDesc& PipelineDesc,
+                                                                                       std::vector<VkFormat>&      ColorAttachmentFormats);
+
+VkImageAspectFlags ComponentTypeToVkAspectMask(COMPONENT_TYPE ComponentType);
 
 } // namespace Diligent

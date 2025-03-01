@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -61,10 +61,9 @@ class DeviceContextD3D12Impl final : public DeviceContextNextGenBase<EngineD3D12
 public:
     using TDeviceContextBase = DeviceContextNextGenBase<EngineD3D12ImplTraits>;
 
-    DeviceContextD3D12Impl(IReferenceCounters*          pRefCounters,
-                           RenderDeviceD3D12Impl*       pDevice,
-                           const EngineD3D12CreateInfo& EngineCI,
-                           const DeviceContextDesc&     Desc);
+    DeviceContextD3D12Impl(IReferenceCounters*      pRefCounters,
+                           RenderDeviceD3D12Impl*   pDevice,
+                           const DeviceContextDesc& Desc);
     ~DeviceContextD3D12Impl();
 
     IMPLEMENT_QUERY_INTERFACE_IN_PLACE(IID_DeviceContextD3D12, TDeviceContextBase)
@@ -360,6 +359,12 @@ public:
         return *m_QueryMgr;
     }
 
+#ifdef DILIGENT_DEVELOPMENT
+    void DvpVerifyDynamicAllocation(const BufferD3D12Impl* pBuffer) const;
+#endif
+    __forceinline D3D12_GPU_VIRTUAL_ADDRESS GetBufferGPUAddress(const BufferD3D12Impl* pBuffer, bool VerifyDynamicAllocation = true) const;
+    ID3D12Resource*                         GetDynamicBufferD3D12ResourceAndOffset(const BufferD3D12Impl* pBuffer, Uint64& DataStartByteOffset);
+
 private:
     void CommitD3D12IndexBuffer(GraphicsContext& GraphCtx, VALUE_TYPE IndexType);
     void CommitD3D12VertexBuffers(GraphicsContext& GraphCtx);
@@ -510,6 +515,16 @@ private:
     };
     std::unordered_map<MappedTextureKey, TextureUploadSpace, MappedTextureKey::Hasher> m_MappedTextures;
 
+    struct MappedBuffer
+    {
+        D3D12DynamicAllocation Allocation;
+#ifdef DILIGENT_DEVELOPMENT
+        UniqueIdentifier DvpBufferUID = -1;
+#endif
+    };
+    // NB: using absl::flat_hash_map<const BufferD3D12Impl*, MappedBuffer> is considerably slower.
+    std::vector<MappedBuffer> m_MappedBuffers;
+
     Int32 m_ActiveQueriesCounter = 0;
 
     std::vector<OptimizedClearValue> m_AttachmentClearValues;
@@ -521,5 +536,28 @@ private:
     // Null render targets require a null RTV. NULL descriptor causes an error.
     DescriptorHeapAllocation m_NullRTV;
 };
+
+__forceinline D3D12_GPU_VIRTUAL_ADDRESS DeviceContextD3D12Impl::GetBufferGPUAddress(const BufferD3D12Impl* pBuffer, bool VerifyDynamicAllocation) const
+{
+    VERIFY_EXPR(pBuffer != nullptr);
+
+    if (pBuffer->GetD3D12Resource() != nullptr)
+    {
+        return pBuffer->GetD3D12Resource()->GetGPUVirtualAddress();
+    }
+
+#ifdef DILIGENT_DEVELOPMENT
+    if (VerifyDynamicAllocation)
+    {
+        DvpVerifyDynamicAllocation(pBuffer);
+    }
+#endif
+
+    const Uint32 DynamicBufferId = pBuffer->GetDynamicBufferId();
+    VERIFY(DynamicBufferId != ~0u, "Dynamic buffer '", pBuffer->GetDesc().Name, "' does not have dynamic buffer ID");
+    return DynamicBufferId < m_MappedBuffers.size() ?
+        m_MappedBuffers[DynamicBufferId].Allocation.GPUAddress :
+        0;
+}
 
 } // namespace Diligent

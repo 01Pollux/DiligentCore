@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -146,7 +146,7 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
             pFactory->EnumerateAdapters(MinVersion, NumAdapters, Adapters.data());
 
             // Validate adapter info
-            for (auto& Adapter : Adapters)
+            for (GraphicsAdapterInfo& Adapter : Adapters)
             {
                 VERIFY_EXPR(Adapter.NumQueues >= 1);
             }
@@ -155,8 +155,8 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
         LOG_INFO_MESSAGE("Found ", Adapters.size(), " compatible ", (Adapters.size() == 1 ? "adapter" : "adapters"));
         for (Uint32 i = 0; i < Adapters.size(); ++i)
         {
-            const auto& AdapterInfo  = Adapters[i];
-            const auto  DisplayModes = EnumerateDisplayModes(AdapterInfo, i);
+            const GraphicsAdapterInfo&            AdapterInfo  = Adapters[i];
+            const std::vector<DisplayModeAttribs> DisplayModes = EnumerateDisplayModes(AdapterInfo, i);
 
             const char* AdapterTypeStr = nullptr;
             switch (AdapterInfo.Type)
@@ -185,11 +185,11 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
         if (AdapterId >= Adapters.size())
             AdapterId = 0;
 
-        constexpr auto QueueMask = COMMAND_QUEUE_TYPE_PRIMARY_MASK;
-        auto*          Queues    = Adapters[AdapterId].Queues;
+        constexpr COMMAND_QUEUE_TYPE QueueMask = COMMAND_QUEUE_TYPE_PRIMARY_MASK;
+        CommandQueueInfo*            Queues    = Adapters[AdapterId].Queues;
         for (Uint32 q = 0, Count = Adapters[AdapterId].NumQueues; q < Count; ++q)
         {
-            auto& CurQueue = Queues[q];
+            CommandQueueInfo& CurQueue = Queues[q];
             if (CurQueue.MaxDeviceContexts == 0)
                 continue;
 
@@ -210,16 +210,20 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
 
     {
         bool FeaturesPrinted = false;
-        DeviceFeatures::Enumerate(EnvCI.Features,
-                                  [&FeaturesPrinted](const char* FeatName, DEVICE_FEATURE_STATE State) //
-                                  {
-                                      if (State != DEVICE_FEATURE_STATE_OPTIONAL)
-                                      {
-                                          std::cout << "Features." << FeatName << " = " << (State == DEVICE_FEATURE_STATE_ENABLED ? "On" : "Off") << '\n';
-                                          FeaturesPrinted = true;
-                                      }
-                                      return true;
-                                  });
+        auto PrintFeature    = [&FeaturesPrinted](const char* FeatName, DEVICE_FEATURE_STATE State) //
+        {
+            if (State != DEVICE_FEATURE_STATE_OPTIONAL)
+            {
+                std::cout << "Features." << FeatName << " = " << (State == DEVICE_FEATURE_STATE_ENABLED ? "On" : "Off") << '\n';
+                FeaturesPrinted = true;
+            }
+            return true;
+        };
+        DeviceFeatures::Enumerate(EnvCI.Features, PrintFeature);
+        if (m_DeviceType == RENDER_DEVICE_TYPE_VULKAN)
+        {
+            DeviceFeaturesVk::Enumerate(EnvCI.FeaturesVk, PrintFeature);
+        }
         if (FeaturesPrinted)
             std::cout << '\n';
     }
@@ -231,14 +235,14 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
         {
 #    if ENGINE_DLL
             // Load the dll and import GetEngineFactoryD3D11() function
-            auto GetEngineFactoryD3D11 = LoadGraphicsEngineD3D11();
+            GetEngineFactoryD3D11Type GetEngineFactoryD3D11 = LoadGraphicsEngineD3D11();
             if (GetEngineFactoryD3D11 == nullptr)
             {
                 LOG_ERROR_AND_THROW("Failed to load the engine");
             }
 #    endif
 
-            auto* pFactoryD3D11 = GetEngineFactoryD3D11();
+            IEngineFactoryD3D11* pFactoryD3D11 = GetEngineFactoryD3D11();
             pFactoryD3D11->SetMessageCallback(EnvCI.MessageCallback);
             pFactoryD3D11->SetBreakOnError(false);
 
@@ -263,7 +267,7 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
 
             EngineCI.AdapterId           = FindAdapter(Adapters, EnvCI.AdapterType, EnvCI.AdapterId);
             NumDeferredCtx               = EnvCI.NumDeferredContexts;
-            EngineCI.NumDeferredContexts = NumDeferredCtx;
+            EngineCI.NumDeferredContexts = NumDeferredCtx / 2;
             ppContexts.resize(std::max(size_t{1}, ContextCI.size()) + NumDeferredCtx);
             pFactoryD3D11->CreateDeviceAndContextsD3D11(EngineCI, &m_pDevice, ppContexts.data());
         }
@@ -275,13 +279,13 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
         {
 #    if ENGINE_DLL
             // Load the dll and import GetEngineFactoryD3D12() function
-            auto GetEngineFactoryD3D12 = LoadGraphicsEngineD3D12();
+            GetEngineFactoryD3D12Type GetEngineFactoryD3D12 = LoadGraphicsEngineD3D12();
             if (GetEngineFactoryD3D12 == nullptr)
             {
                 LOG_ERROR_AND_THROW("Failed to load the engine");
             }
 #    endif
-            auto* pFactoryD3D12 = GetEngineFactoryD3D12();
+            IEngineFactoryD3D12* pFactoryD3D12 = GetEngineFactoryD3D12();
             pFactoryD3D12->SetMessageCallback(EnvCI.MessageCallback);
             pFactoryD3D12->SetBreakOnError(false);
 
@@ -327,7 +331,7 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
             EngineCI.DynamicDescriptorAllocationChunkSize[1] = 8;  // D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER
 
             NumDeferredCtx               = EnvCI.NumDeferredContexts;
-            EngineCI.NumDeferredContexts = NumDeferredCtx;
+            EngineCI.NumDeferredContexts = NumDeferredCtx / 2;
             ppContexts.resize(std::max(size_t{1}, ContextCI.size()) + NumDeferredCtx);
             pFactoryD3D12->CreateDeviceAndContextsD3D12(EngineCI, &m_pDevice, ppContexts.data());
         }
@@ -341,13 +345,13 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
 #    if EXPLICITLY_LOAD_ENGINE_GL_DLL
             // Declare function pointer
             // Load the dll and import GetEngineFactoryOpenGL() function
-            auto GetEngineFactoryOpenGL = LoadGraphicsEngineOpenGL();
+            GetEngineFactoryOpenGLType GetEngineFactoryOpenGL = LoadGraphicsEngineOpenGL();
             if (GetEngineFactoryOpenGL == nullptr)
             {
                 LOG_ERROR_AND_THROW("Failed to load the engine");
             }
 #    endif
-            auto* pFactoryOpenGL = GetEngineFactoryOpenGL();
+            IEngineFactoryOpenGL* pFactoryOpenGL = GetEngineFactoryOpenGL();
             pFactoryOpenGL->SetMessageCallback(EnvCI.MessageCallback);
             pFactoryOpenGL->SetBreakOnError(false);
 
@@ -355,7 +359,7 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
                               [](const GraphicsAdapterInfo& AdapterInfo, Uint32 AdapterId) {
                                   return std::vector<DisplayModeAttribs>{};
                               });
-            auto Window = CreateNativeWindow();
+            NativeWindow Window = CreateNativeWindow();
 
             EngineGLCreateInfo EngineCI;
 
@@ -378,14 +382,14 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
         {
 #    if EXPLICITLY_LOAD_ENGINE_VK_DLL
             // Load the dll and import GetEngineFactoryVk() function
-            auto GetEngineFactoryVk = LoadGraphicsEngineVk();
+            GetEngineFactoryVkType GetEngineFactoryVk = LoadGraphicsEngineVk();
             if (GetEngineFactoryVk == nullptr)
             {
                 LOG_ERROR_AND_THROW("Failed to load the engine");
             }
 #    endif
 
-            auto* pFactoryVk = GetEngineFactoryVk();
+            IEngineFactoryVk* pFactoryVk = GetEngineFactoryVk();
             pFactoryVk->SetMessageCallback(EnvCI.MessageCallback);
             pFactoryVk->SetBreakOnError(false);
 
@@ -422,11 +426,12 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
             //EngineCI.DeviceLocalMemoryReserveSize = 32 << 20;
             //EngineCI.HostVisibleMemoryReserveSize = 48 << 20;
             EngineCI.Features                  = EnvCI.Features;
+            EngineCI.FeaturesVk                = EnvCI.FeaturesVk;
             EngineCI.IgnoreDebugMessageCount   = static_cast<Uint32>(IgnoreDebugMessages.size());
             EngineCI.ppIgnoreDebugMessageNames = IgnoreDebugMessages.data();
 
             NumDeferredCtx               = EnvCI.NumDeferredContexts;
-            EngineCI.NumDeferredContexts = NumDeferredCtx;
+            EngineCI.NumDeferredContexts = NumDeferredCtx / 2;
             ppContexts.resize(std::max(size_t{1}, ContextCI.size()) + NumDeferredCtx);
             pFactoryVk->CreateDeviceAndContextsVk(EngineCI, &m_pDevice, ppContexts.data());
         }
@@ -460,7 +465,7 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
             EngineCI.SetValidationLevel(VALIDATION_LEVEL_1);
 
             NumDeferredCtx               = EnvCI.NumDeferredContexts;
-            EngineCI.NumDeferredContexts = NumDeferredCtx;
+            EngineCI.NumDeferredContexts = NumDeferredCtx / 2;
             ppContexts.resize(std::max(size_t{1}, ContextCI.size()) + NumDeferredCtx);
             pFactoryMtl->CreateDeviceAndContextsMtl(EngineCI, &m_pDevice, ppContexts.data());
         }
@@ -470,13 +475,13 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
         case RENDER_DEVICE_TYPE_WEBGPU:
         {
 #    if EXPLICITLY_LOAD_ENGINE_WEBGPU_DLL
-            auto GetEngineFactoryWebGPU = LoadGraphicsEngineWebGPU();
+            GetEngineFactoryWebGPUType GetEngineFactoryWebGPU = LoadGraphicsEngineWebGPU();
             if (GetEngineFactoryWebGPU == nullptr)
             {
                 LOG_ERROR_AND_THROW("Failed to load the engine");
             }
 #    endif
-            auto* pFactoryWGPU = GetEngineFactoryWebGPU();
+            IEngineFactoryWebGPU* pFactoryWGPU = GetEngineFactoryWebGPU();
             pFactoryWGPU->SetMessageCallback(MessageCallback);
             pFactoryWGPU->SetBreakOnError(false);
 
@@ -492,8 +497,13 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
             break;
     }
 
+    for (Uint32 ctx = NumDeferredCtx / 2; ctx < NumDeferredCtx; ++ctx)
     {
-        const auto& ActualFeats = m_pDevice->GetDeviceInfo().Features;
+        m_pDevice->CreateDeferredContext(&ppContexts[std::max(ContextCI.size(), size_t{1}) + ctx]);
+    }
+
+    {
+        const DeviceFeatures& ActualFeats = m_pDevice->GetDeviceInfo().Features;
 #define CHECK_FEATURE_STATE(Feature)                                                                                                      \
     if (EnvCI.Features.Feature != DEVICE_FEATURE_STATE_OPTIONAL && EnvCI.Features.Feature != ActualFeats.Feature)                         \
     {                                                                                                                                     \
@@ -515,7 +525,7 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
         if (ppContexts[i] == nullptr)
             LOG_ERROR_AND_THROW("Context must not be null");
 
-        const auto CtxDesc = ppContexts[i]->GetDesc();
+        const DeviceContextDesc CtxDesc = ppContexts[i]->GetDesc();
         VERIFY(CtxDesc.ContextId == static_cast<Uint8>(i), "Invalid context index");
         if (i < m_NumImmediateContexts)
         {
@@ -531,16 +541,16 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
 
     for (size_t i = 0; i < ContextCI.size(); ++i)
     {
-        const auto& CtxCI   = ContextCI[i];
-        const auto  CtxDesc = m_pDeviceContexts[i]->GetDesc();
+        const ImmediateContextCreateInfo& CtxCI   = ContextCI[i];
+        const DeviceContextDesc           CtxDesc = m_pDeviceContexts[i]->GetDesc();
         if (CtxCI.QueueId != CtxDesc.QueueId)
             LOG_ERROR_MESSAGE("QueueId mismatch");
         if (i != CtxDesc.ContextId)
             LOG_ERROR_MESSAGE("CommandQueueId mismatch");
     }
 
-    const auto& AdapterInfo = m_pDevice->GetAdapterInfo();
-    std::string AdapterInfoStr;
+    const GraphicsAdapterInfo& AdapterInfo = m_pDevice->GetAdapterInfo();
+    std::string                AdapterInfoStr;
     AdapterInfoStr = "Adapter description: ";
     AdapterInfoStr += AdapterInfo.Description;
     AdapterInfoStr += ". Vendor: ";
@@ -589,11 +599,13 @@ GPUTestingEnvironment::GPUTestingEnvironment(const CreateInfo& EnvCI, const Swap
     AdapterInfoStr += " MB.";
     LOG_INFO_MESSAGE(AdapterInfoStr);
 
+    LOG_INFO_MESSAGE("Device features:\n", GetDeviceFeaturesString(m_pDevice->GetDeviceInfo().Features, 3));
+
 #if ARCHIVER_SUPPORTED
     // Create archiver factory
     {
 #    if EXPLICITLY_LOAD_ARCHIVER_FACTORY_DLL
-        auto GetArchiverFactory = LoadArchiverFactory();
+        GetArchiverFactoryType GetArchiverFactory = LoadArchiverFactory();
         if (GetArchiverFactory != nullptr)
         {
             m_ArchiverFactory = GetArchiverFactory();
@@ -611,14 +623,14 @@ GPUTestingEnvironment::~GPUTestingEnvironment()
 {
     for (Uint32 i = 0; i < GetNumImmediateContexts(); ++i)
     {
-        auto* pCtx = GetDeviceContext(i);
+        IDeviceContext* pCtx = GetDeviceContext(i);
         pCtx->Flush();
         pCtx->FinishFrame();
 
         if (i == 0)
         {
-            const auto& Stats       = pCtx->GetStats();
-            const auto& CmdCounters = Stats.CommandCounters;
+            const DeviceContextStats&           Stats       = pCtx->GetStats();
+            const DeviceContextCommandCounters& CmdCounters = Stats.CommandCounters;
             LOG_INFO_MESSAGE(
                 "Device context stats"
                 "\n  Command counters",
@@ -691,7 +703,7 @@ void GPUTestingEnvironment::ReleaseResources()
     // later causing out-of-memory error.
     for (Uint32 i = 0; i < GetNumImmediateContexts(); ++i)
     {
-        auto* pCtx = GetDeviceContext(i);
+        IDeviceContext* pCtx = GetDeviceContext(i);
         pCtx->Flush();
         pCtx->FinishFrame();
         pCtx->WaitForIdle();
@@ -703,7 +715,7 @@ void GPUTestingEnvironment::Reset()
 {
     for (Uint32 i = 0; i < GetNumImmediateContexts(); ++i)
     {
-        auto* pCtx = GetDeviceContext(i);
+        IDeviceContext* pCtx = GetDeviceContext(i);
         pCtx->Flush();
         pCtx->FinishFrame();
         pCtx->InvalidateState();
@@ -724,15 +736,26 @@ RefCntAutoPtr<ITexture> GPUTestingEnvironment::CreateTexture(const char* Name, T
     TexDesc.Width     = Width;
     TexDesc.Height    = Height;
 
-    const auto        FmtAttribs = GetTextureFormatAttribs(Fmt);
-    TextureSubResData Mip0Data{pInitData, FmtAttribs.ComponentSize * FmtAttribs.NumComponents * Width};
-    TextureData       TexData{&Mip0Data, 1};
+    const TextureFormatAttribs& FmtAttribs = GetTextureFormatAttribs(Fmt);
+    TextureSubResData           Mip0Data{pInitData, FmtAttribs.ComponentSize * FmtAttribs.NumComponents * Width};
+    TextureData                 TexData{&Mip0Data, 1};
 
     RefCntAutoPtr<ITexture> pTexture;
     m_pDevice->CreateTexture(TexDesc, pInitData ? &TexData : nullptr, &pTexture);
     VERIFY_EXPR(pTexture != nullptr);
 
     return pTexture;
+}
+
+RefCntAutoPtr<IBuffer> GPUTestingEnvironment::CreateBuffer(const BufferDesc& Desc, const void* pInitData)
+{
+    RefCntAutoPtr<IBuffer> pBuffer;
+
+    BufferData InitData{pInitData, Desc.Size};
+    m_pDevice->CreateBuffer(Desc, pInitData ? &InitData : nullptr, &pBuffer);
+    VERIFY_EXPR(pBuffer != nullptr);
+
+    return pBuffer;
 }
 
 RefCntAutoPtr<ISampler> GPUTestingEnvironment::CreateSampler(const SamplerDesc& Desc)
@@ -858,42 +881,45 @@ SHADER_COMPILER GPUTestingEnvironment::GetDefaultCompiler(SHADER_SOURCE_LANGUAGE
         return m_ShaderCompiler;
 }
 
-static bool ParseFeatureState(const char* Arg, DeviceFeatures& Features)
+static bool ParseFeatureState(const char* Arg, DeviceFeatures& Features, DeviceFeaturesVk& FeaturesVk)
 {
     static const std::string ArgStart = "--Features.";
     if (ArgStart.compare(0, ArgStart.length(), Arg, ArgStart.length()) != 0)
         return false;
 
     Arg += ArgStart.length();
-    DeviceFeatures::Enumerate(Features,
-                              [Arg](const char* FeatName, DEVICE_FEATURE_STATE& State) //
-                              {
-                                  const auto NameLen = strlen(FeatName);
-                                  if (strncmp(FeatName, Arg, NameLen) != 0)
-                                      return true;
 
-                                  if (Arg[NameLen] != '=')
-                                      return true; // Continue processing
+    auto ParseFeature = [Arg](const char* FeatName, DEVICE_FEATURE_STATE& State) //
+    {
+        const size_t NameLen = strlen(FeatName);
+        if (strncmp(FeatName, Arg, NameLen) != 0)
+            return true;
 
-                                  const auto Value = Arg + NameLen + 1;
+        if (Arg[NameLen] != '=')
+            return true; // Continue processing
 
-                                  static const std::string Off      = "Off";
-                                  static const std::string On       = "On";
-                                  static const std::string Disabled = "Disabled";
-                                  static const std::string Enabled  = "Enabled";
+        const char* Value = Arg + NameLen + 1;
 
-                                  if (StrCmpNoCase(Value, On.c_str()) == 0 || StrCmpNoCase(Value, Enabled.c_str()) == 0)
-                                      State = DEVICE_FEATURE_STATE_ENABLED;
-                                  else if (StrCmpNoCase(Value, Off.c_str()) == 0 || StrCmpNoCase(Value, Disabled.c_str()) == 0)
-                                      State = DEVICE_FEATURE_STATE_DISABLED;
-                                  else
-                                  {
-                                      LOG_ERROR_MESSAGE('\'', Value, "' is not a valid value for feature '", FeatName, "'. The following values are allowed: '",
-                                                        Off, "', '", Disabled, "', '", On, "', '", Enabled, "'.");
-                                  }
+        static const std::string Off      = "Off";
+        static const std::string On       = "On";
+        static const std::string Disabled = "Disabled";
+        static const std::string Enabled  = "Enabled";
 
-                                  return false;
-                              });
+        if (StrCmpNoCase(Value, On.c_str()) == 0 || StrCmpNoCase(Value, Enabled.c_str()) == 0)
+            State = DEVICE_FEATURE_STATE_ENABLED;
+        else if (StrCmpNoCase(Value, Off.c_str()) == 0 || StrCmpNoCase(Value, Disabled.c_str()) == 0)
+            State = DEVICE_FEATURE_STATE_DISABLED;
+        else
+        {
+            LOG_ERROR_MESSAGE('\'', Value, "' is not a valid value for feature '", FeatName, "'. The following values are allowed: '",
+                              Off, "', '", Disabled, "', '", On, "', '", Enabled, "'.");
+        }
+
+        return false;
+    };
+
+    DeviceFeatures::Enumerate(Features, ParseFeature);
+    DeviceFeaturesVk::Enumerate(FeaturesVk, ParseFeature);
 
     return false;
 }
@@ -907,7 +933,7 @@ GPUTestingEnvironment* GPUTestingEnvironment::Initialize(int argc, char** argv)
     {
         const std::string AdapterArgName = "--adapter=";
 
-        const auto* arg = argv[i];
+        const char* arg = argv[i];
         if (strcmp(arg, "--mode=d3d11") == 0)
         {
             TestEnvCI.deviceType = RENDER_DEVICE_TYPE_D3D11;
@@ -937,7 +963,7 @@ GPUTestingEnvironment* GPUTestingEnvironment::Initialize(int argc, char** argv)
         }
         else if (strcmp(arg, "--mode=gl") == 0)
         {
-#if PLATFORM_EMSCRIPTEN || PLATFORM_ANDROID
+#if PLATFORM_WEB || PLATFORM_ANDROID
             TestEnvCI.deviceType = RENDER_DEVICE_TYPE_GLES;
 #else
             TestEnvCI.deviceType = RENDER_DEVICE_TYPE_GL;
@@ -953,7 +979,7 @@ GPUTestingEnvironment* GPUTestingEnvironment::Initialize(int argc, char** argv)
         }
         else if (AdapterArgName.compare(0, AdapterArgName.length(), arg, AdapterArgName.length()) == 0)
         {
-            const auto* AdapterStr = arg + AdapterArgName.length();
+            const char* AdapterStr = arg + AdapterArgName.length();
             if (strcmp(AdapterStr, "sw") == 0)
                 TestEnvCI.AdapterType = ADAPTER_TYPE_SOFTWARE;
             else
@@ -971,7 +997,7 @@ GPUTestingEnvironment* GPUTestingEnvironment::Initialize(int argc, char** argv)
         {
             TestEnvCI.EnableDeviceSimulation = true;
         }
-        else if (ParseFeatureState(arg, TestEnvCI.Features))
+        else if (ParseFeatureState(arg, TestEnvCI.Features, TestEnvCI.FeaturesVk))
         {
             // Feature state has been updated by ParseFeatureState
         }
@@ -1041,7 +1067,7 @@ GPUTestingEnvironment* GPUTestingEnvironment::Initialize(int argc, char** argv)
                 LOG_ERROR_AND_THROW("Unsupported device type");
         }
 
-        const auto DeviceType = pEnv->GetDevice()->GetDeviceInfo().Type;
+        const RENDER_DEVICE_TYPE DeviceType = pEnv->GetDevice()->GetDeviceInfo().Type;
         if (DeviceType != TestEnvCI.deviceType)
         {
             delete pEnv;
@@ -1049,7 +1075,7 @@ GPUTestingEnvironment* GPUTestingEnvironment::Initialize(int argc, char** argv)
                                 ") does not match the type of the device that was created (", GetRenderDeviceTypeString(DeviceType), ").");
         }
 
-        const auto AdapterType = pEnv->GetDevice()->GetAdapterInfo().Type;
+        const ADAPTER_TYPE AdapterType = pEnv->GetDevice()->GetAdapterInfo().Type;
         if (TestEnvCI.AdapterType != ADAPTER_TYPE_UNKNOWN && TestEnvCI.AdapterType != AdapterType)
         {
             delete pEnv;

@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,12 +38,15 @@
 namespace Diligent
 {
 
+namespace
+{
+
 VkImageCreateInfo TextureDescToVkImageCreateInfo(const TextureDesc& Desc, const RenderDeviceVkImpl* pRenderDeviceVk) noexcept
 {
-    const auto  IsMemoryless         = (Desc.MiscFlags & MISC_TEXTURE_FLAG_MEMORYLESS) != 0;
-    const auto& FmtAttribs           = GetTextureFormatAttribs(Desc.Format);
-    const auto  ImageView2DSupported = !Desc.Is3D() || pRenderDeviceVk->GetAdapterInfo().Texture.TextureView2DOn3DSupported;
-    const auto& ExtFeatures          = pRenderDeviceVk->GetLogicalDevice().GetEnabledExtFeatures();
+    const bool                  IsMemoryless         = (Desc.MiscFlags & MISC_TEXTURE_FLAG_MEMORYLESS) != 0;
+    const TextureFormatAttribs& FmtAttribs           = GetTextureFormatAttribs(Desc.Format);
+    const bool                  ImageView2DSupported = !Desc.Is3D() || pRenderDeviceVk->GetAdapterInfo().Texture.TextureView2DOn3DSupported;
+    const auto&                 ExtFeatures          = pRenderDeviceVk->GetLogicalDevice().GetEnabledExtFeatures();
 
     VkImageCreateInfo ImageCI = {};
 
@@ -109,8 +112,8 @@ VkImageCreateInfo TextureDescToVkImageCreateInfo(const TextureDesc& Desc, const 
         VERIFY_EXPR(!IsMemoryless);
 #ifdef DILIGENT_DEVELOPMENT
         {
-            const auto& PhysicalDevice = pRenderDeviceVk->GetPhysicalDevice();
-            const auto  FmtProperties  = PhysicalDevice.GetPhysicalDeviceFormatProperties(ImageCI.format);
+            const VulkanUtilities::VulkanPhysicalDevice& PhysicalDevice = pRenderDeviceVk->GetPhysicalDevice();
+            const VkFormatProperties                     FmtProperties  = PhysicalDevice.GetPhysicalDeviceFormatProperties(ImageCI.format);
             DEV_CHECK_ERR((FmtProperties.optimalTilingFeatures & (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) == (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT),
                           "Automatic mipmap generation is not supported for ", GetTextureFormatAttribs(InternalTexFmt).Name,
                           " as the format does not support blitting.");
@@ -143,6 +146,67 @@ VkImageCreateInfo TextureDescToVkImageCreateInfo(const TextureDesc& Desc, const 
     return ImageCI;
 }
 
+VkImageLayout VkImageLayoutFromUsage(VkImageUsageFlags Usage)
+{
+    if ((Usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) != 0)
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    if ((Usage & VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT) != 0)
+        return VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
+
+    if ((Usage & VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR) != 0)
+        return VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR;
+
+    if ((Usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0)
+        return VK_IMAGE_LAYOUT_GENERAL;
+
+    if ((Usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0)
+        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    if ((Usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0)
+        return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL_KHR;
+
+    VERIFY((Usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0, "TRANSFER_SRC_BIT should always be set");
+    return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+}
+
+bool CheckHostImageInitialization(const VulkanUtilities::VulkanLogicalDevice&  LogicalDevice,
+                                  const VulkanUtilities::VulkanPhysicalDevice& PhysicalDevice,
+                                  const VkImageCreateInfo&                     ImageCI)
+{
+    if (!LogicalDevice.GetEnabledExtFeatures().HostImageCopy.hostImageCopy)
+        return false;
+
+    if (!PhysicalDevice.IsUMA())
+    {
+        // On discrete GPUs, textures with VK_IMAGE_USAGE_HOST_TRANSFER_BIT usage are allocated in a host-visible
+        // device-local memory that is very scarce.
+        return false;
+    }
+
+    VkFormatProperties3 vkFormatProps3{};
+    VkFormatProperties  VkFormatProps = PhysicalDevice.GetPhysicalDeviceFormatProperties(ImageCI.format, &vkFormatProps3);
+    (void)VkFormatProps;
+
+    if ((vkFormatProps3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT) == 0)
+        return false;
+
+    const VulkanUtilities::VulkanPhysicalDevice::ExtensionProperties& ExtProps           = PhysicalDevice.GetExtProperties();
+    const VkPhysicalDeviceHostImageCopyPropertiesEXT&                 HostImageCopyProps = ExtProps.HostImageCopy;
+
+    const VkImageLayout DstLayout = VkImageLayoutFromUsage(ImageCI.usage);
+
+    auto LayoutSupported = [](const VkImageLayout* pLayouts, uint32_t LayoutCount, VkImageLayout Layout) {
+        return std::find(pLayouts, pLayouts + LayoutCount, Layout) != pLayouts + LayoutCount;
+    };
+
+    if (!LayoutSupported(HostImageCopyProps.pCopyDstLayouts, HostImageCopyProps.copyDstLayoutCount, DstLayout))
+        return false;
+
+    return true;
+}
+
+} // namespace
 
 TextureVkImpl::TextureVkImpl(IReferenceCounters*        pRefCounters,
                              FixedBlockMemoryAllocator& TexViewObjAllocator,
@@ -162,15 +226,15 @@ TextureVkImpl::TextureVkImpl(IReferenceCounters*        pRefCounters,
     if (m_Desc.Usage == USAGE_IMMUTABLE && (pInitData == nullptr || pInitData->pSubResources == nullptr))
         LOG_ERROR_AND_THROW("Immutable textures must be initialized with data at creation time: pInitData can't be null");
 
-    const auto IsMemoryless = (m_Desc.MiscFlags & MISC_TEXTURE_FLAG_MEMORYLESS) != 0;
+    const bool IsMemoryless = (m_Desc.MiscFlags & MISC_TEXTURE_FLAG_MEMORYLESS) != 0;
     if (IsMemoryless && pInitData != nullptr && pInitData->pSubResources != nullptr)
         LOG_ERROR_AND_THROW("Memoryless textures can't be initialized");
 
     if (m_Desc.Usage == USAGE_SPARSE && m_Desc.Is3D() && (m_Desc.BindFlags & (BIND_RENDER_TARGET | BIND_DEPTH_STENCIL)) != 0)
         LOG_ERROR_AND_THROW("Sparse 3D texture with BIND_RENDER_TARGET or BIND_DEPTH_STENCIL is not supported in Vulkan");
 
-    const auto& FmtAttribs    = GetTextureFormatAttribs(m_Desc.Format);
-    const auto& LogicalDevice = pRenderDeviceVk->GetLogicalDevice();
+    const TextureFormatAttribs&                 FmtAttribs    = GetTextureFormatAttribs(m_Desc.Format);
+    const VulkanUtilities::VulkanLogicalDevice& LogicalDevice = pRenderDeviceVk->GetLogicalDevice();
 
     if (m_Desc.Usage == USAGE_IMMUTABLE || m_Desc.Usage == USAGE_DEFAULT || m_Desc.Usage == USAGE_DYNAMIC || m_Desc.Usage == USAGE_SPARSE)
     {
@@ -179,7 +243,12 @@ TextureVkImpl::TextureVkImpl(IReferenceCounters*        pRefCounters,
 
         VkImageCreateInfo ImageCI = TextureDescToVkImageCreateInfo(m_Desc, pRenderDeviceVk);
 
-        const auto QueueFamilyIndices = PlatformMisc::CountOneBits(m_Desc.ImmediateContextMask) > 1 ?
+        const bool InitContent           = pInitData != nullptr && pInitData->pSubResources != nullptr && pInitData->NumSubresources > 0;
+        const bool UseHostInitialization = InitContent && CheckHostImageInitialization(LogicalDevice, pRenderDeviceVk->GetPhysicalDevice(), ImageCI);
+        if (UseHostInitialization)
+            ImageCI.usage |= VK_IMAGE_USAGE_HOST_TRANSFER_BIT;
+
+        const std::vector<uint32_t> QueueFamilyIndices = PlatformMisc::CountOneBits(m_Desc.ImmediateContextMask) > 1 ?
             GetDevice()->ConvertCmdQueueIdsToQueueFamilies(m_Desc.ImmediateContextMask) :
             std::vector<uint32_t>{};
         if (QueueFamilyIndices.size() > 1)
@@ -211,22 +280,35 @@ TextureVkImpl::TextureVkImpl(IReferenceCounters*        pRefCounters,
 
             VkMemoryRequirements MemReqs = LogicalDevice.GetImageMemoryRequirements(m_VulkanImage);
 
-            const auto ImageMemoryFlags = IsMemoryless ? VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+            const VkMemoryPropertyFlags ImageMemoryFlags = IsMemoryless ? VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
             VERIFY(IsPowerOfTwo(MemReqs.alignment), "Alignment is not power of 2!");
             m_MemoryAllocation = pRenderDeviceVk->AllocateMemory(MemReqs, ImageMemoryFlags);
             if (!m_MemoryAllocation)
                 LOG_ERROR_AND_THROW("Failed to allocate memory for texture '", m_Desc.Name, "'.");
 
-            auto AlignedOffset = AlignUp(m_MemoryAllocation.UnalignedOffset, MemReqs.alignment);
+            VkDeviceSize AlignedOffset = AlignUp(m_MemoryAllocation.UnalignedOffset, MemReqs.alignment);
             VERIFY_EXPR(m_MemoryAllocation.Size >= MemReqs.size + (AlignedOffset - m_MemoryAllocation.UnalignedOffset));
-            auto Memory = m_MemoryAllocation.Page->GetVkMemory();
-            auto err    = LogicalDevice.BindImageMemory(m_VulkanImage, Memory, AlignedOffset);
+            VkDeviceMemory Memory = m_MemoryAllocation.Page->GetVkMemory();
+            VkResult       err    = LogicalDevice.BindImageMemory(m_VulkanImage, Memory, AlignedOffset);
             CHECK_VK_ERROR_AND_THROW(err, "Failed to bind image memory");
 
-            if (pInitData != nullptr && pInitData->pSubResources != nullptr && pInitData->NumSubresources > 0)
-                InitializeTextureContent(*pInitData, FmtAttribs, ImageCI);
+            if (InitContent)
+            {
+                bool InitializedOnHost = false;
+                if (UseHostInitialization)
+                {
+                    InitializedOnHost = InitializeContentOnHost(*pInitData, FmtAttribs, ImageCI);
+                }
+
+                if (!InitializedOnHost)
+                {
+                    InitializeContentOnDevice(*pInitData, FmtAttribs, ImageCI);
+                }
+            }
             else
+            {
                 SetState(RESOURCE_STATE_UNDEFINED);
+            }
         }
     }
     else if (m_Desc.Usage == USAGE_STAGING)
@@ -241,13 +323,104 @@ TextureVkImpl::TextureVkImpl(IReferenceCounters*        pRefCounters,
     VERIFY_EXPR(IsInKnownState());
 }
 
-void TextureVkImpl::InitializeTextureContent(const TextureData&          InitData,
-                                             const TextureFormatAttribs& FmtAttribs,
-                                             const VkImageCreateInfo&    ImageCI) noexcept(false)
+bool TextureVkImpl::InitializeContentOnHost(const TextureData&          InitData,
+                                            const TextureFormatAttribs& FmtAttribs,
+                                            const VkImageCreateInfo&    ImageCI) noexcept(false)
 {
-    const auto& LogicalDevice = GetDevice()->GetLogicalDevice();
+    const VulkanUtilities::VulkanLogicalDevice& LogicalDevice = GetDevice()->GetLogicalDevice();
+    VERIFY_EXPR(LogicalDevice.GetEnabledExtFeatures().HostImageCopy.hostImageCopy);
 
-    const auto CmdQueueInd = InitData.pContext ?
+    Uint32 ExpectedNumSubresources = ImageCI.mipLevels * ImageCI.arrayLayers;
+    if (InitData.NumSubresources != ExpectedNumSubresources)
+        LOG_ERROR_AND_THROW("Incorrect number of subresources in init data. ", ExpectedNumSubresources, " expected, while ", InitData.NumSubresources, " provided");
+
+    VERIFY(FmtAttribs.ComponentType != COMPONENT_TYPE_DEPTH_STENCIL, "Initializing depth-stencil texture is currently not supported.");
+    const VkImageAspectFlags aspectMask = ComponentTypeToVkAspectMask(FmtAttribs.ComponentType);
+
+    std::vector<VkMemoryToImageCopyEXT> vkCopyRegions(InitData.NumSubresources);
+
+    Uint32 subres = 0;
+    for (Uint32 layer = 0; layer < ImageCI.arrayLayers; ++layer)
+    {
+        for (Uint32 mip = 0; mip < ImageCI.mipLevels; ++mip)
+        {
+            const TextureSubResData& SubResData = InitData.pSubResources[subres];
+            VkMemoryToImageCopyEXT&  vkCopyInfo = vkCopyRegions[subres];
+            MipLevelProperties       MipInfo    = GetMipLevelProperties(m_Desc, mip);
+
+            vkCopyInfo.sType        = VK_STRUCTURE_TYPE_MEMORY_TO_IMAGE_COPY_EXT;
+            vkCopyInfo.pNext        = nullptr;
+            vkCopyInfo.pHostPointer = SubResData.pData;
+
+            const Uint32 PixelSize = FmtAttribs.ComponentType == COMPONENT_TYPE_COMPRESSED ?
+                Uint32{FmtAttribs.ComponentSize} :
+                Uint32{FmtAttribs.ComponentSize} * Uint32{FmtAttribs.NumComponents};
+            if ((SubResData.Stride % PixelSize) != 0)
+            {
+                LOG_DVP_WARNING_MESSAGE("Unable to initialize texture '", m_Desc.Name, "' on host: subresource ", subres, " has stride ", SubResData.Stride,
+                                        " that is not multiple of pixel size ", PixelSize, ". The content will be initialized on device.");
+                return false;
+            }
+            vkCopyInfo.memoryRowLength = FmtAttribs.ComponentType == COMPONENT_TYPE_COMPRESSED ?
+                static_cast<uint32_t>(SubResData.Stride * FmtAttribs.BlockWidth / FmtAttribs.ComponentSize) :
+                static_cast<uint32_t>(SubResData.Stride / PixelSize);
+
+            if ((SubResData.DepthStride % SubResData.Stride) != 0)
+            {
+                LOG_DVP_WARNING_MESSAGE("Unable to initialize texture '", m_Desc.Name, "' on host: subresource ", subres, " has depth stride ", SubResData.DepthStride,
+                                        " that is not multiple of row stride ", SubResData.Stride, ". The content will be initialized on device.");
+                return false;
+            }
+            vkCopyInfo.memoryImageHeight = static_cast<uint32_t>(SubResData.DepthStride * FmtAttribs.BlockHeight / SubResData.Stride);
+
+            vkCopyInfo.imageSubresource.aspectMask     = aspectMask;
+            vkCopyInfo.imageSubresource.mipLevel       = mip;
+            vkCopyInfo.imageSubresource.baseArrayLayer = layer;
+            vkCopyInfo.imageSubresource.layerCount     = 1;
+
+            vkCopyInfo.imageOffset = {0, 0, 0};
+            vkCopyInfo.imageExtent = {MipInfo.LogicalWidth, MipInfo.LogicalHeight, MipInfo.Depth};
+
+            ++subres;
+        }
+    }
+
+    VkHostImageLayoutTransitionInfoEXT vkLayoutTransitionInfo{};
+    vkLayoutTransitionInfo.sType     = VK_STRUCTURE_TYPE_HOST_IMAGE_LAYOUT_TRANSITION_INFO_EXT;
+    vkLayoutTransitionInfo.image     = m_VulkanImage;
+    vkLayoutTransitionInfo.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vkLayoutTransitionInfo.newLayout = VkImageLayoutFromUsage(ImageCI.usage);
+
+    vkLayoutTransitionInfo.subresourceRange.aspectMask     = aspectMask;
+    vkLayoutTransitionInfo.subresourceRange.baseArrayLayer = 0;
+    vkLayoutTransitionInfo.subresourceRange.layerCount     = VK_REMAINING_ARRAY_LAYERS;
+    vkLayoutTransitionInfo.subresourceRange.baseMipLevel   = 0;
+    vkLayoutTransitionInfo.subresourceRange.levelCount     = VK_REMAINING_MIP_LEVELS;
+    LogicalDevice.HostTransitionImageLayout(vkLayoutTransitionInfo);
+
+    VkCopyMemoryToImageInfoEXT vkCopyInfo{};
+    vkCopyInfo.sType          = VK_STRUCTURE_TYPE_COPY_MEMORY_TO_IMAGE_INFO_EXT;
+    vkCopyInfo.pNext          = nullptr;
+    vkCopyInfo.flags          = 0;
+    vkCopyInfo.dstImage       = m_VulkanImage;
+    vkCopyInfo.dstImageLayout = vkLayoutTransitionInfo.newLayout;
+    vkCopyInfo.regionCount    = static_cast<uint32_t>(vkCopyRegions.size());
+    vkCopyInfo.pRegions       = vkCopyRegions.data();
+
+    LogicalDevice.CopyMemoryToImage(vkCopyInfo);
+
+    SetState(VkImageLayoutToResourceState(vkCopyInfo.dstImageLayout));
+
+    return true;
+}
+
+void TextureVkImpl::InitializeContentOnDevice(const TextureData&          InitData,
+                                              const TextureFormatAttribs& FmtAttribs,
+                                              const VkImageCreateInfo&    ImageCI) noexcept(false)
+{
+    const VulkanUtilities::VulkanLogicalDevice& LogicalDevice = GetDevice()->GetLogicalDevice();
+
+    const SoftwareQueueIndex CmdQueueInd = InitData.pContext ?
         ClassPtrCast<DeviceContextVkImpl>(InitData.pContext)->GetCommandQueueId() :
         SoftwareQueueIndex{PlatformMisc::GetLSB(m_Desc.ImmediateContextMask)};
 
@@ -258,18 +431,8 @@ void TextureVkImpl::InitializeTextureContent(const TextureData&          InitDat
     VulkanUtilities::VulkanCommandBuffer CmdBuffer;
     GetDevice()->AllocateTransientCmdPool(CmdQueueInd, CmdPool, CmdBuffer, "Transient command pool to copy staging data to a device buffer");
 
-    VkImageAspectFlags aspectMask = 0;
-    if (FmtAttribs.ComponentType == COMPONENT_TYPE_DEPTH)
-        aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    else if (FmtAttribs.ComponentType == COMPONENT_TYPE_DEPTH_STENCIL)
-    {
-        UNSUPPORTED("Initializing depth-stencil texture is not currently supported");
-        // Only single aspect bit must be specified when copying texture data
-
-        aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
-    }
-    else
-        aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    VERIFY(FmtAttribs.ComponentType != COMPONENT_TYPE_DEPTH_STENCIL, "Initializing depth-stencil texture is currently not supported.");
+    const VkImageAspectFlags aspectMask = ComponentTypeToVkAspectMask(FmtAttribs.ComponentType);
 
     // For either clear or copy command, dst layout must be VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
     VkImageSubresourceRange SubresRange;
@@ -280,7 +443,7 @@ void TextureVkImpl::InitializeTextureContent(const TextureData&          InitDat
     SubresRange.levelCount     = VK_REMAINING_MIP_LEVELS;
     CmdBuffer.TransitionImageLayout(m_VulkanImage, ImageCI.initialLayout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, SubresRange, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     SetState(RESOURCE_STATE_COPY_DEST);
-    const auto CurrentLayout = GetLayout();
+    const VkImageLayout CurrentLayout = GetLayout();
     VERIFY_EXPR(CurrentLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     Uint32 ExpectedNumSubresources = ImageCI.mipLevels * ImageCI.arrayLayers;
@@ -295,11 +458,11 @@ void TextureVkImpl::InitializeTextureContent(const TextureData&          InitDat
     {
         for (Uint32 mip = 0; mip < ImageCI.mipLevels; ++mip)
         {
-            const auto& SubResData = InitData.pSubResources[subres];
+            const TextureSubResData& SubResData = InitData.pSubResources[subres];
             (void)SubResData;
-            auto& CopyRegion = Regions[subres];
+            VkBufferImageCopy& CopyRegion = Regions[subres];
 
-            auto MipInfo = GetMipLevelProperties(m_Desc, mip);
+            MipLevelProperties MipInfo = GetMipLevelProperties(m_Desc, mip);
 
             CopyRegion.bufferOffset = uploadBufferSize; // offset in bytes from the start of the buffer object
             // bufferRowLength and bufferImageHeight specify the data in buffer memory as a subregion
@@ -351,15 +514,15 @@ void TextureVkImpl::InitializeTextureContent(const TextureData&          InitDat
     // VK_MEMORY_PROPERTY_HOST_COHERENT_BIT bit specifies that the host cache management commands vkFlushMappedMemoryRanges
     // and vkInvalidateMappedMemoryRanges are NOT needed to flush host writes to the device or make device writes visible
     // to the host (10.2)
-    auto StagingMemoryAllocation = GetDevice()->AllocateMemory(StagingBufferMemReqs, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VulkanUtilities::VulkanMemoryAllocation StagingMemoryAllocation = GetDevice()->AllocateMemory(StagingBufferMemReqs, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (!StagingMemoryAllocation)
         LOG_ERROR_AND_THROW("Failed to allocate staging memory for texture '", m_Desc.Name, "'.");
 
-    auto StagingBufferMemory     = StagingMemoryAllocation.Page->GetVkMemory();
-    auto AlignedStagingMemOffset = AlignUp(StagingMemoryAllocation.UnalignedOffset, StagingBufferMemReqs.alignment);
+    VkDeviceMemory StagingBufferMemory     = StagingMemoryAllocation.Page->GetVkMemory();
+    VkDeviceSize   AlignedStagingMemOffset = AlignUp(StagingMemoryAllocation.UnalignedOffset, StagingBufferMemReqs.alignment);
     VERIFY_EXPR(StagingMemoryAllocation.Size >= StagingBufferMemReqs.size + (AlignedStagingMemOffset - StagingMemoryAllocation.UnalignedOffset));
 
-    auto* StagingData = reinterpret_cast<uint8_t*>(StagingMemoryAllocation.Page->GetCPUMemory());
+    uint8_t* StagingData = reinterpret_cast<uint8_t*>(StagingMemoryAllocation.Page->GetCPUMemory());
     VERIFY_EXPR(StagingData != nullptr);
     StagingData += AlignedStagingMemOffset;
 
@@ -368,10 +531,10 @@ void TextureVkImpl::InitializeTextureContent(const TextureData&          InitDat
     {
         for (Uint32 mip = 0; mip < ImageCI.mipLevels; ++mip)
         {
-            const auto& SubResData = InitData.pSubResources[subres];
-            const auto& CopyRegion = Regions[subres];
+            const TextureSubResData& SubResData = InitData.pSubResources[subres];
+            const VkBufferImageCopy& CopyRegion = Regions[subres];
 
-            auto MipInfo = GetMipLevelProperties(m_Desc, mip);
+            MipLevelProperties MipInfo = GetMipLevelProperties(m_Desc, mip);
 
             VERIFY_EXPR(MipInfo.LogicalWidth == CopyRegion.imageExtent.width);
             VERIFY_EXPR(MipInfo.LogicalHeight == CopyRegion.imageExtent.height);
@@ -397,7 +560,7 @@ void TextureVkImpl::InitializeTextureContent(const TextureData&          InitDat
     }
     VERIFY_EXPR(subres == InitData.NumSubresources);
 
-    auto err = LogicalDevice.BindBufferMemory(StagingBuffer, StagingBufferMemory, AlignedStagingMemOffset);
+    VkResult err = LogicalDevice.BindBufferMemory(StagingBuffer, StagingBufferMemory, AlignedStagingMemOffset);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to bind staging buffer memory");
 
     CmdBuffer.MemoryBarrier(VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -419,8 +582,8 @@ void TextureVkImpl::InitializeTextureContent(const TextureData&          InitDat
 
 void TextureVkImpl::CreateStagingTexture(const TextureData* pInitData, const TextureFormatAttribs& FmtAttribs)
 {
-    const bool  bInitializeTexture = (pInitData != nullptr && pInitData->pSubResources != nullptr && pInitData->NumSubresources > 0);
-    const auto& LogicalDevice      = GetDevice()->GetLogicalDevice();
+    const bool                                  bInitializeTexture = (pInitData != nullptr && pInitData->pSubResources != nullptr && pInitData->NumSubresources > 0);
+    const VulkanUtilities::VulkanLogicalDevice& LogicalDevice      = GetDevice()->GetLogicalDevice();
 
     VkBufferCreateInfo VkStagingBuffCI = {};
 
@@ -445,7 +608,7 @@ void TextureVkImpl::CreateStagingTexture(const TextureData* pInitData, const Tex
 
         // We do not set HOST_COHERENT bit, so we will have to use InvalidateMappedMemoryRanges,
         // which requires the ranges to be aligned by nonCoherentAtomSize.
-        const auto& DeviceLimits = GetDevice()->GetPhysicalDevice().GetProperties().limits;
+        const VkPhysicalDeviceLimits& DeviceLimits = GetDevice()->GetPhysicalDevice().GetProperties().limits;
         // Align the buffer size to ensure that any aligned range is always in bounds.
         VkStagingBuffCI.size = AlignUp(VkStagingBuffCI.size, DeviceLimits.nonCoherentAtomSize);
     }
@@ -477,11 +640,11 @@ void TextureVkImpl::CreateStagingTexture(const TextureData* pInitData, const Tex
     if (!m_MemoryAllocation)
         LOG_ERROR_AND_THROW("Failed to allocate memory for staging texture '", m_Desc.Name, "'.");
 
-    auto StagingBufferMemory     = m_MemoryAllocation.Page->GetVkMemory();
-    auto AlignedStagingMemOffset = AlignUp(m_MemoryAllocation.UnalignedOffset, StagingBufferMemReqs.alignment);
+    VkDeviceMemory StagingBufferMemory     = m_MemoryAllocation.Page->GetVkMemory();
+    VkDeviceSize   AlignedStagingMemOffset = AlignUp(m_MemoryAllocation.UnalignedOffset, StagingBufferMemReqs.alignment);
     VERIFY_EXPR(m_MemoryAllocation.Size >= StagingBufferMemReqs.size + (AlignedStagingMemOffset - m_MemoryAllocation.UnalignedOffset));
 
-    auto err = LogicalDevice.BindBufferMemory(m_StagingBuffer, StagingBufferMemory, AlignedStagingMemOffset);
+    VkResult err = LogicalDevice.BindBufferMemory(m_StagingBuffer, StagingBufferMemory, AlignedStagingMemOffset);
     CHECK_VK_ERROR_AND_THROW(err, "Failed to bind staging buffer memory");
 
     m_StagingDataAlignedOffset = AlignedStagingMemOffset;
@@ -495,10 +658,10 @@ void TextureVkImpl::CreateStagingTexture(const TextureData* pInitData, const Tex
         {
             for (Uint32 mip = 0; mip < m_Desc.MipLevels; ++mip)
             {
-                const auto& SubResData = pInitData->pSubResources[subres++];
-                const auto  MipProps   = GetMipLevelProperties(m_Desc, mip);
+                const TextureSubResData& SubResData = pInitData->pSubResources[subres++];
+                const MipLevelProperties MipProps   = GetMipLevelProperties(m_Desc, mip);
 
-                const auto DstSubresOffset =
+                const Uint64 DstSubresOffset =
                     GetStagingTextureSubresourceOffset(m_Desc, layer, mip, StagingBufferOffsetAlignment);
 
                 CopyTextureSubresource(SubResData,
@@ -539,14 +702,14 @@ void TextureVkImpl::CreateViewInternal(const TextureViewDesc& ViewDesc, ITexture
 
     try
     {
-        auto& TexViewAllocator = m_pDevice->GetTexViewObjAllocator();
+        FixedBlockMemoryAllocator& TexViewAllocator = m_pDevice->GetTexViewObjAllocator();
         VERIFY(&TexViewAllocator == &m_dbgTexViewObjAllocator, "Texture view allocator does not match allocator provided during texture initialization");
 
-        auto UpdatedViewDesc = ViewDesc;
+        TextureViewDesc UpdatedViewDesc = ViewDesc;
         ValidatedAndCorrectTextureViewDesc(m_Desc, UpdatedViewDesc);
 
         VulkanUtilities::ImageViewWrapper ImgView = CreateImageView(UpdatedViewDesc);
-        auto                              pViewVk = NEW_RC_OBJ(TexViewAllocator, "TextureViewVkImpl instance", TextureViewVkImpl, bIsDefaultView ? this : nullptr)(GetDevice(), UpdatedViewDesc, this, std::move(ImgView), bIsDefaultView);
+        TextureViewVkImpl*                pViewVk = NEW_RC_OBJ(TexViewAllocator, "TextureViewVkImpl instance", TextureViewVkImpl, bIsDefaultView ? this : nullptr)(GetDevice(), UpdatedViewDesc, this, std::move(ImgView), bIsDefaultView);
         VERIFY(pViewVk->GetDesc().ViewType == ViewDesc.ViewType, "Incorrect view type");
 
         if (bIsDefaultView)
@@ -556,7 +719,7 @@ void TextureVkImpl::CreateViewInternal(const TextureViewDesc& ViewDesc, ITexture
     }
     catch (const std::runtime_error&)
     {
-        const auto* ViewTypeName = GetTexViewTypeLiteralName(ViewDesc.ViewType);
+        const char* ViewTypeName = GetTexViewTypeLiteralName(ViewDesc.ViewType);
         LOG_ERROR("Failed to create view \"", ViewDesc.Name ? ViewDesc.Name : "", "\" (", ViewTypeName, ") for texture \"", m_Desc.Name ? m_Desc.Name : "", "\"");
     }
 }
@@ -693,7 +856,7 @@ VulkanUtilities::ImageViewWrapper TextureVkImpl::CreateImageView(TextureViewDesc
         ImageViewCI.subresourceRange.layerCount     = 1;
     }
 
-    const auto& FmtAttribs = GetTextureFormatAttribs(CorrectedViewFormat);
+    const TextureFormatAttribs& FmtAttribs = GetTextureFormatAttribs(CorrectedViewFormat);
 
     if (ViewDesc.ViewType == TEXTURE_VIEW_DEPTH_STENCIL || ViewDesc.ViewType == TEXTURE_VIEW_READ_ONLY_DEPTH_STENCIL)
     {
@@ -738,13 +901,13 @@ VulkanUtilities::ImageViewWrapper TextureVkImpl::CreateImageView(TextureViewDesc
             ImageViewCI.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     }
 
-    const auto& LogicalDevice = m_pDevice->GetLogicalDevice();
+    const VulkanUtilities::VulkanLogicalDevice& LogicalDevice = m_pDevice->GetLogicalDevice();
 
     if (ViewDesc.ViewType == TEXTURE_VIEW_SHADING_RATE)
     {
         if (LogicalDevice.GetEnabledExtFeatures().FragmentDensityMap.fragmentDensityMap != VK_FALSE)
         {
-            const auto ShadingRateTexAccess = m_pDevice->GetAdapterInfo().ShadingRate.ShadingRateTextureAccess;
+            const SHADING_RATE_TEXTURE_ACCESS ShadingRateTexAccess = m_pDevice->GetAdapterInfo().ShadingRate.ShadingRateTextureAccess;
             switch (ShadingRateTexAccess)
             {
                 case SHADING_RATE_TEXTURE_ACCESS_ON_GPU:
@@ -777,14 +940,14 @@ void TextureVkImpl::SetLayout(VkImageLayout Layout)
 
 VkImageLayout TextureVkImpl::GetLayout() const
 {
-    const auto fragmentDensityMap = m_pDevice->GetLogicalDevice().GetEnabledExtFeatures().FragmentDensityMap.fragmentDensityMap;
+    const VkBool32 fragmentDensityMap = m_pDevice->GetLogicalDevice().GetEnabledExtFeatures().FragmentDensityMap.fragmentDensityMap;
     return ResourceStateToVkImageLayout(GetState(), /*IsInsideRenderPass = */ false, fragmentDensityMap != VK_FALSE);
 }
 
 void TextureVkImpl::InvalidateStagingRange(VkDeviceSize Offset, VkDeviceSize Size)
 {
-    const auto& LogicalDevice    = m_pDevice->GetLogicalDevice();
-    const auto& PhysDeviceLimits = m_pDevice->GetPhysicalDevice().GetProperties().limits;
+    const VulkanUtilities::VulkanLogicalDevice& LogicalDevice    = m_pDevice->GetLogicalDevice();
+    const VkPhysicalDeviceLimits&               PhysDeviceLimits = m_pDevice->GetPhysicalDevice().GetProperties().limits;
 
     VkMappedMemoryRange InvalidateRange{};
     InvalidateRange.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -792,14 +955,14 @@ void TextureVkImpl::InvalidateStagingRange(VkDeviceSize Offset, VkDeviceSize Siz
     InvalidateRange.memory = m_MemoryAllocation.Page->GetVkMemory();
 
     Offset += m_StagingDataAlignedOffset;
-    auto AlignedOffset = AlignDown(Offset, PhysDeviceLimits.nonCoherentAtomSize);
+    VkDeviceSize AlignedOffset = AlignDown(Offset, PhysDeviceLimits.nonCoherentAtomSize);
     Size += Offset - AlignedOffset;
-    auto AlignedSize = AlignUp(Size, PhysDeviceLimits.nonCoherentAtomSize);
+    VkDeviceSize AlignedSize = AlignUp(Size, PhysDeviceLimits.nonCoherentAtomSize);
 
     InvalidateRange.offset = AlignedOffset;
     InvalidateRange.size   = AlignedSize;
 
-    auto err = LogicalDevice.InvalidateMappedMemoryRanges(1, &InvalidateRange);
+    VkResult err = LogicalDevice.InvalidateMappedMemoryRanges(1, &InvalidateRange);
     DEV_CHECK_ERR(err == VK_SUCCESS, "Failed to invalidated mapped texture memory range");
     (void)err;
 }
@@ -811,8 +974,8 @@ void TextureVkImpl::InitSparseProperties() noexcept(false)
 
     m_pSparseProps = std::make_unique<SparseTextureProperties>();
 
-    const auto& LogicalDevice = m_pDevice->GetLogicalDevice();
-    const auto  MemReq        = LogicalDevice.GetImageMemoryRequirements(GetVkImage());
+    const VulkanUtilities::VulkanLogicalDevice& LogicalDevice = m_pDevice->GetLogicalDevice();
+    const VkMemoryRequirements                  MemReq        = LogicalDevice.GetImageMemoryRequirements(GetVkImage());
 
     // If the image was not created with VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT, then pSparseMemoryRequirementCount will be set to zero.
     uint32_t SparseReqCount = 0;
@@ -824,7 +987,7 @@ void TextureVkImpl::InitSparseProperties() noexcept(false)
     VkSparseImageMemoryRequirements SparseReq[2] = {};
     vkGetImageSparseMemoryRequirements(LogicalDevice.GetVkDevice(), GetVkImage(), &SparseReqCount, SparseReq);
 
-    auto& Props{*m_pSparseProps};
+    SparseTextureProperties& Props{*m_pSparseProps};
     Props.MipTailOffset  = SparseReq[0].imageMipTailOffset;
     Props.MipTailSize    = SparseReq[0].imageMipTailSize;
     Props.MipTailStride  = SparseReq[0].imageMipTailStride;
@@ -857,9 +1020,9 @@ void TextureVkImpl::InitSparseProperties() noexcept(false)
     Props.BlockSize        = StaticCast<Uint32>(MemReq.alignment);
 
 #ifdef DILIGENT_DEBUG
-    const auto&  FmtAttribs    = GetTextureFormatAttribs(m_Desc.Format);
-    const Uint32 BytesPerBlock = FmtAttribs.GetElementSize();
-    const auto   BytesPerTile =
+    const TextureFormatAttribs& FmtAttribs    = GetTextureFormatAttribs(m_Desc.Format);
+    const Uint32                BytesPerBlock = FmtAttribs.GetElementSize();
+    const Uint32                BytesPerTile =
         (Props.TileSize[0] / FmtAttribs.BlockWidth) *
         (Props.TileSize[1] / FmtAttribs.BlockHeight) *
         Props.TileSize[2] * m_Desc.SampleCount * BytesPerBlock;

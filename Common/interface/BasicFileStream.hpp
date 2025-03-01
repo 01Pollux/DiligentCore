@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2022 Diligent Graphics LLC
+ *  Copyright 2019-2024 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,6 +34,7 @@
 #include "../../Primitives/interface/DataBlob.h"
 #include "ObjectBase.hpp"
 #include "FileWrapper.hpp"
+#include "RefCntAutoPtr.hpp"
 
 namespace Diligent
 {
@@ -43,6 +44,8 @@ class BasicFileStream : public ObjectBase<IFileStream>
 {
 public:
     typedef ObjectBase<IFileStream> TBase;
+
+    static RefCntAutoPtr<BasicFileStream> Create(const Char* Path, EFileAccessMode Access = EFileAccessMode::Read);
 
     BasicFileStream(IReferenceCounters* pRefCounters,
                     const Char*         Path,
@@ -60,6 +63,10 @@ public:
     virtual bool DILIGENT_CALL_TYPE Write(const void* Data, size_t Size) override;
 
     virtual size_t DILIGENT_CALL_TYPE GetSize() override;
+
+    virtual size_t DILIGENT_CALL_TYPE GetPos() override;
+
+    virtual bool DILIGENT_CALL_TYPE SetPos(size_t Offset, int Origin) override;
 
     virtual bool DILIGENT_CALL_TYPE IsValid() override;
 

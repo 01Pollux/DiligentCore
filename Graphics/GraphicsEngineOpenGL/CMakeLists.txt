@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.6)
+cmake_minimum_required (VERSION 3.10)
 
 project(Diligent-GraphicsEngineOpenGL CXX)
 
@@ -45,6 +45,9 @@ set(INCLUDE
     include/TextureViewGLImpl.hpp
     include/VAOCache.hpp
 )
+if(DILIGENT_USE_OPENXR)
+    list(APPEND INCLUDE include/OpenXR_GLHelpers.hpp)
+endif()
 
 set(INTERFACE
     interface/BaseInterfacesGL.h
@@ -140,7 +143,7 @@ elseif(PLATFORM_IOS)
     list(APPEND INCLUDE include/GLStubsIOS.h)
     list(APPEND SOURCE src/SwapChainGLIOS.mm)
     list(APPEND INCLUDE include/SwapChainGLIOS.hpp)
-elseif(PLATFORM_EMSCRIPTEN)
+elseif(PLATFORM_WEB)
     list(APPEND SOURCE src/GLContextEmscripten.cpp)
     list(APPEND SOURCE src/RenderDeviceGLESImpl.cpp)
     list(APPEND SOURCE src/SwapChainGLImpl.cpp)
@@ -210,7 +213,7 @@ elseif(PLATFORM_MACOS)
     set(PRIVATE_DEPENDENCIES ${PRIVATE_DEPENDENCIES} GLEW::glew OpenGL::GL)
 elseif(PLATFORM_IOS)
     set(PRIVATE_DEPENDENCIES ${PRIVATE_DEPENDENCIES} ${OPENGLES})
-elseif(PLATFORM_EMSCRIPTEN)
+elseif(PLATFORM_WEB)
 else()
     message(FATAL_ERROR "Unknown platform")
 endif()
@@ -271,7 +274,7 @@ if(PLATFORM_MACOS)
 elseif(PLATFORM_IOS)
     # Silence GLES deprecation warnings
     target_compile_definitions(Diligent-GraphicsEngineOpenGL-static PUBLIC GLES_SILENCE_DEPRECATION)
-elseif(PLATFORM_EMSCRIPTEN)
+elseif(PLATFORM_WEB)
     target_link_options(Diligent-GraphicsEngineOpenGL-static PUBLIC "SHELL: -s FULL_ES3=1 -s USE_PTHREADS=1")
 endif()
 
@@ -285,6 +288,11 @@ else()
     set_target_properties(Diligent-GraphicsEngineOpenGL-shared PROPERTIES
         OUTPUT_NAME GraphicsEngineOpenGL
     )
+endif()
+
+if(DILIGENT_USE_OPENXR)
+    target_link_libraries(Diligent-GraphicsEngineOpenGL-static PRIVATE OpenXR::headers)
+    target_compile_definitions(Diligent-GraphicsEngineOpenGL-static PRIVATE DILIGENT_USE_OPENXR=1)
 endif()
 
 add_library(Diligent-GLAdapterSelector OBJECT "src/GLAdapterSelector.cpp")

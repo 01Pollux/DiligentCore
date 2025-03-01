@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,7 +37,7 @@ namespace VulkanUtilities
 
 std::unique_ptr<VulkanPhysicalDevice> VulkanPhysicalDevice::Create(const CreateInfo& CI)
 {
-    auto* PhysicalDevice = new VulkanPhysicalDevice{CI};
+    VulkanPhysicalDevice* PhysicalDevice = new VulkanPhysicalDevice{CI};
     return std::unique_ptr<VulkanPhysicalDevice>{PhysicalDevice};
 }
 
@@ -62,7 +62,7 @@ VulkanPhysicalDevice::VulkanPhysicalDevice(const CreateInfo& CI) :
     if (ExtensionCount > 0)
     {
         m_SupportedExtensions.resize(ExtensionCount);
-        auto res = vkEnumerateDeviceExtensionProperties(m_VkDevice, nullptr, &ExtensionCount, m_SupportedExtensions.data());
+        VkResult res = vkEnumerateDeviceExtensionProperties(m_VkDevice, nullptr, &ExtensionCount, m_SupportedExtensions.data());
         VERIFY_EXPR(res == VK_SUCCESS);
         (void)res;
         VERIFY_EXPR(ExtensionCount == m_SupportedExtensions.size());
@@ -336,6 +336,28 @@ VulkanPhysicalDevice::VulkanPhysicalDevice(const CreateInfo& CI) :
             m_ExtProperties.MultiDraw.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTI_DRAW_PROPERTIES_EXT;
         }
 
+        if (IsExtensionSupported(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME))
+        {
+            *NextFeat = &m_ExtFeatures.DynamicRendering;
+            NextFeat  = &m_ExtFeatures.DynamicRendering.pNext;
+
+            m_ExtFeatures.DynamicRendering.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+        }
+
+        const bool HostImageCopySupported = IsExtensionSupported(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
+        if (HostImageCopySupported)
+        {
+            *NextFeat = &m_ExtFeatures.HostImageCopy;
+            NextFeat  = &m_ExtFeatures.HostImageCopy.pNext;
+
+            m_ExtFeatures.HostImageCopy.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT;
+
+            *NextProp = &m_ExtProperties.HostImageCopy;
+            NextProp  = &m_ExtProperties.HostImageCopy.pNext;
+
+            m_ExtProperties.HostImageCopy.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_PROPERTIES_EXT;
+        }
+
         // make sure that last pNext is null
         *NextFeat = nullptr;
         *NextProp = nullptr;
@@ -345,6 +367,18 @@ VulkanPhysicalDevice::VulkanPhysicalDevice(const CreateInfo& CI) :
         vkGetPhysicalDeviceFeatures2KHR(m_VkDevice, &Feats2);
         vkGetPhysicalDeviceProperties2KHR(m_VkDevice, &Props2);
 
+        if (HostImageCopySupported)
+        {
+            m_ExtProperties.HostImageCopy.pNext = nullptr;
+            if (m_ExtProperties.HostImageCopy.copySrcLayoutCount + m_ExtProperties.HostImageCopy.copyDstLayoutCount > 0)
+            {
+                m_ExtProperties.HostImageCopyLayouts          = std::make_unique<VkImageLayout[]>(m_ExtProperties.HostImageCopy.copySrcLayoutCount + m_ExtProperties.HostImageCopy.copyDstLayoutCount);
+                m_ExtProperties.HostImageCopy.pCopySrcLayouts = m_ExtProperties.HostImageCopy.copySrcLayoutCount > 0 ? &m_ExtProperties.HostImageCopyLayouts[0] : nullptr;
+                m_ExtProperties.HostImageCopy.pCopyDstLayouts = m_ExtProperties.HostImageCopy.copyDstLayoutCount > 0 ? &m_ExtProperties.HostImageCopyLayouts[m_ExtProperties.HostImageCopy.copySrcLayoutCount] : nullptr;
+            }
+            Props2.pNext = &m_ExtProperties.HostImageCopy;
+            vkGetPhysicalDeviceProperties2KHR(m_VkDevice, &Props2);
+        }
 
         // Check texture formats
         if (m_ExtFeatures.ShadingRate.attachmentFragmentShadingRate != VK_FALSE)
@@ -398,7 +432,7 @@ HardwareQueueIndex VulkanPhysicalDevice::FindQueueFamily(VkQueueFlags QueueFlags
     {
         // First try to find a queue, for which the flags match exactly
         // (i.e. dedicated compute or transfer queue)
-        const auto& Props = m_QueueFamilyProperties[i];
+        const VkQueueFamilyProperties& Props = m_QueueFamilyProperties[i];
         if (Props.queueFlags == QueueFlags ||
             Props.queueFlags == QueueFlagsOpt)
         {
@@ -412,7 +446,7 @@ HardwareQueueIndex VulkanPhysicalDevice::FindQueueFamily(VkQueueFlags QueueFlags
         for (uint32_t i = 0; i < m_QueueFamilyProperties.size(); ++i)
         {
             // Try to find a queue for which all requested flags are set
-            const auto& Props = m_QueueFamilyProperties[i];
+            const VkQueueFamilyProperties& Props = m_QueueFamilyProperties[i];
             // Check only QueueFlags as VK_QUEUE_TRANSFER_BIT is
             // optional for graphics and/or compute queues
             if ((Props.queueFlags & QueueFlags) == QueueFlags)
@@ -428,7 +462,7 @@ HardwareQueueIndex VulkanPhysicalDevice::FindQueueFamily(VkQueueFlags QueueFlags
         if (QueueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))
         {
 #ifdef DILIGENT_DEBUG
-            const auto& Props = m_QueueFamilyProperties[FamilyInd];
+            const VkQueueFamilyProperties& Props = m_QueueFamilyProperties[FamilyInd];
             // Queues supporting graphics and/or compute operations must report (1,1,1)
             // in minImageTransferGranularity, meaning that there are no additional restrictions
             // on the granularity of image transfer operations for these queues (4.1).
@@ -448,7 +482,7 @@ HardwareQueueIndex VulkanPhysicalDevice::FindQueueFamily(VkQueueFlags QueueFlags
 
 bool VulkanPhysicalDevice::IsExtensionSupported(const char* ExtensionName) const
 {
-    for (const auto& Extension : m_SupportedExtensions)
+    for (const VkExtensionProperties& Extension : m_SupportedExtensions)
         if (strcmp(Extension.extensionName, ExtensionName) == 0)
             return true;
 
@@ -509,11 +543,32 @@ uint32_t VulkanPhysicalDevice::GetMemoryTypeIndex(uint32_t              memoryTy
     return InvalidMemoryTypeIndex;
 }
 
-VkFormatProperties VulkanPhysicalDevice::GetPhysicalDeviceFormatProperties(VkFormat imageFormat) const
+VkFormatProperties VulkanPhysicalDevice::GetPhysicalDeviceFormatProperties(VkFormat imageFormat, VkFormatProperties3* Properties3) const
 {
-    VkFormatProperties formatProperties;
-    vkGetPhysicalDeviceFormatProperties(m_VkDevice, imageFormat, &formatProperties);
-    return formatProperties;
+    if (Properties3 != nullptr)
+    {
+        *Properties3       = {};
+        Properties3->sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3_KHR;
+
+        VkFormatProperties2 VkFormatProps2{};
+        VkFormatProps2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+        VkFormatProps2.pNext = Properties3;
+
+        vkGetPhysicalDeviceFormatProperties2(m_VkDevice, imageFormat, &VkFormatProps2);
+
+        return VkFormatProps2.formatProperties;
+    }
+    else
+    {
+        VkFormatProperties formatProperties;
+        vkGetPhysicalDeviceFormatProperties(m_VkDevice, imageFormat, &formatProperties);
+        return formatProperties;
+    }
+}
+
+bool VulkanPhysicalDevice::IsUMA() const
+{
+    return m_MemoryProperties.memoryHeapCount == 1;
 }
 
 } // namespace VulkanUtilities

@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -545,7 +545,7 @@ public:
         VERIFY_EXPR(this->m_Desc.IsRayTracingPipeline());
         VERIFY_EXPR(m_pRayTracingPipelineData != nullptr);
 
-        const auto ShaderHandleSize = m_pRayTracingPipelineData->ShaderHandleSize;
+        const Uint32 ShaderHandleSize = m_pRayTracingPipelineData->ShaderHandleSize;
         VERIFY(ShaderHandleSize <= DataSize, "DataSize (", DataSize, ") must be at least as large as the shader handle size (", ShaderHandleSize, ").");
 
         if (Name == nullptr || Name[0] == '\0')
@@ -568,6 +568,13 @@ public:
     virtual void DILIGENT_CALL_TYPE CreateShaderResourceBinding(IShaderResourceBinding** ppShaderResourceBinding,
                                                                 bool                     InitStaticResources) override final
     {
+        if (ppShaderResourceBinding == nullptr)
+        {
+            DEV_ERROR("ppShaderResourceBinding must not be null");
+            return;
+        }
+        DEV_CHECK_ERR(*ppShaderResourceBinding == nullptr, "Overwriting existing shader resource binding pointer may cause a memory leak.");
+
         CheckPipelineReady();
 
         *ppShaderResourceBinding = nullptr;
@@ -700,7 +707,7 @@ public:
             return;
         }
 
-        auto* pDstSign = static_cast<PipelineStateImplType*>(pDstPipeline)->GetResourceSignature(0);
+        PipelineResourceSignatureImplType* pDstSign = static_cast<PipelineStateImplType*>(pDstPipeline)->GetResourceSignature(0);
         return this->GetResourceSignature(0)->CopyStaticResources(pDstSign);
     }
 
@@ -731,17 +738,17 @@ public:
         RefCntAutoPtr<PipelineStateImplType> pPSOImpl{const_cast<IPipelineState*>(pPSO), PipelineStateImplType::IID_InternalImpl};
         VERIFY(pPSOImpl, "Unknown PSO implementation type");
 
-        const auto& lhs = *static_cast<const PipelineStateImplType*>(this);
-        const auto& rhs = *pPSOImpl;
+        const PipelineStateImplType& lhs = *static_cast<const PipelineStateImplType*>(this);
+        const PipelineStateImplType& rhs = *pPSOImpl;
 
-        const auto SignCount = lhs.GetResourceSignatureCount();
+        const Uint32 SignCount = lhs.GetResourceSignatureCount();
         if (SignCount != rhs.GetResourceSignatureCount())
             return false;
 
         for (Uint32 s = 0; s < SignCount; ++s)
         {
-            const auto* pLhsSign = GetResourceSignature(s);
-            const auto* pRhsSign = rhs.GetResourceSignature(s);
+            const PipelineResourceSignatureImplType* pLhsSign = GetResourceSignature(s);
+            const PipelineResourceSignatureImplType* pRhsSign = rhs.GetResourceSignature(s);
             if (!PipelineResourceSignatureImplType::SignaturesCompatible(pLhsSign, pRhsSign))
                 return false;
         }
@@ -765,6 +772,13 @@ public:
         return m_ActiveShaderStages;
     }
 
+#ifdef DILIGENT_DEVELOPMENT
+    size_t DvpGetRenderTargerFormatsHash() const
+    {
+        return m_pGraphicsPipelineData ? m_pGraphicsPipelineData->dvpRenderTargetFormatsHash : 0;
+    }
+#endif
+
 protected:
     using TNameToGroupIndexMap = std::unordered_map<HashMapStringKey, Uint32>;
 
@@ -775,14 +789,14 @@ protected:
         ReserveResourceLayout(CreateInfo.PSODesc.ResourceLayout, MemPool);
         ReserveResourceSignatures(CreateInfo, MemPool);
 
-        const auto& InputLayout = CreateInfo.GraphicsPipeline.InputLayout;
+        const InputLayoutDesc& InputLayout = CreateInfo.GraphicsPipeline.InputLayout;
         if (InputLayout.NumElements > 0)
         {
             Uint32 BufferSlotsUsed = 0;
             MemPool.AddSpace<LayoutElement>(InputLayout.NumElements);
             for (Uint32 i = 0; i < InputLayout.NumElements; ++i)
             {
-                auto& LayoutElem = InputLayout.LayoutElements[i];
+                const LayoutElement& LayoutElem = InputLayout.LayoutElements[i];
                 MemPool.AddSpaceForString(LayoutElem.HLSLSemantic);
                 BufferSlotsUsed = std::max(BufferSlotsUsed, LayoutElem.BufferSlot + 1);
             }
@@ -805,7 +819,7 @@ protected:
     {
         size_t RTDataSize = sizeof(RayTracingPipelineData);
         // Reserve space for shader handles
-        const auto ShaderHandleSize = this->GetDevice()->GetAdapterInfo().RayTracing.ShaderGroupHandleSize;
+        const Uint32 ShaderHandleSize = this->GetDevice()->GetAdapterInfo().RayTracing.ShaderGroupHandleSize;
         RTDataSize += size_t{ShaderHandleSize} *
             (size_t{CreateInfo.GeneralShaderCount} +
              size_t{CreateInfo.TriangleHitShaderCount} +
@@ -839,12 +853,11 @@ protected:
         ReserveResourceSignatures(CreateInfo, MemPool);
     }
 
-public:
 protected:
     template <typename ShaderImplType, typename PSOCreateInfoType>
     void Construct(const PSOCreateInfoType& CreateInfo)
     {
-        auto* const pThisImpl = static_cast<PipelineStateImplType*>(this);
+        PipelineStateImplType* const pThisImpl = static_cast<PipelineStateImplType*>(this);
 
         m_Status.store(PIPELINE_STATE_STATUS_COMPILING);
         if ((CreateInfo.Flags & PSO_CREATE_FLAG_ASYNCHRONOUS) != 0 && this->m_pDevice->GetShaderCompilationThreadPool() != nullptr)
@@ -930,10 +943,10 @@ protected:
         void* Ptr                     = MemPool.ReleaseOwnership();
         VERIFY_EXPR(Ptr == m_pPipelineDataRawMem);
 
-        auto& GraphicsPipeline = this->m_pGraphicsPipelineData->Desc;
-        auto& pRenderPass      = this->m_pGraphicsPipelineData->pRenderPass;
-        auto& BufferSlotsUsed  = this->m_pGraphicsPipelineData->BufferSlotsUsed;
-        auto& pStrides         = this->m_pGraphicsPipelineData->pStrides;
+        GraphicsPipelineDesc&       GraphicsPipeline = this->m_pGraphicsPipelineData->Desc;
+        RefCntAutoPtr<IRenderPass>& pRenderPass      = this->m_pGraphicsPipelineData->pRenderPass;
+        Uint8&                      BufferSlotsUsed  = this->m_pGraphicsPipelineData->BufferSlotsUsed;
+        Uint32*&                    pStrides         = this->m_pGraphicsPipelineData->pStrides;
 
         GraphicsPipeline = CreateInfo.GraphicsPipeline;
         CorrectGraphicsPipelineDesc(GraphicsPipeline, this->GetDevice()->GetDeviceInfo().Features);
@@ -944,14 +957,14 @@ protected:
         pRenderPass = GraphicsPipeline.pRenderPass;
         if (pRenderPass)
         {
-            const auto& RPDesc = pRenderPass->GetDesc();
+            const RenderPassDesc& RPDesc = pRenderPass->GetDesc();
             VERIFY_EXPR(GraphicsPipeline.SubpassIndex < RPDesc.SubpassCount);
-            const auto& Subpass = pRenderPass.template RawPtr<RenderPassImplType>()->GetSubpass(GraphicsPipeline.SubpassIndex);
+            const SubpassDesc& Subpass = pRenderPass.template RawPtr<RenderPassImplType>()->GetSubpass(GraphicsPipeline.SubpassIndex);
 
             GraphicsPipeline.NumRenderTargets = static_cast<Uint8>(Subpass.RenderTargetAttachmentCount);
             for (Uint32 rt = 0; rt < Subpass.RenderTargetAttachmentCount; ++rt)
             {
-                const auto& RTAttachmentRef = Subpass.pRenderTargetAttachments[rt];
+                const AttachmentReference& RTAttachmentRef = Subpass.pRenderTargetAttachments[rt];
                 if (RTAttachmentRef.AttachmentIndex != ATTACHMENT_UNUSED)
                 {
                     VERIFY_EXPR(RTAttachmentRef.AttachmentIndex < RPDesc.AttachmentCount);
@@ -961,7 +974,7 @@ protected:
 
             if (Subpass.pDepthStencilAttachment != nullptr)
             {
-                const auto& DSAttachmentRef = *Subpass.pDepthStencilAttachment;
+                const AttachmentReference& DSAttachmentRef = *Subpass.pDepthStencilAttachment;
                 if (DSAttachmentRef.AttachmentIndex != ATTACHMENT_UNUSED)
                 {
                     VERIFY_EXPR(DSAttachmentRef.AttachmentIndex < RPDesc.AttachmentCount);
@@ -970,26 +983,31 @@ protected:
             }
         }
 
-        const auto&    InputLayout     = GraphicsPipeline.InputLayout;
-        LayoutElement* pLayoutElements = nullptr;
+        const InputLayoutDesc& InputLayout     = GraphicsPipeline.InputLayout;
+        LayoutElement*         pLayoutElements = nullptr;
         if (InputLayout.NumElements > 0)
         {
             pLayoutElements = MemPool.ConstructArray<LayoutElement>(InputLayout.NumElements);
             for (size_t Elem = 0; Elem < InputLayout.NumElements; ++Elem)
             {
-                const auto& SrcElem   = InputLayout.LayoutElements[Elem];
-                pLayoutElements[Elem] = SrcElem;
+                const LayoutElement& SrcElem = InputLayout.LayoutElements[Elem];
+                pLayoutElements[Elem]        = SrcElem;
                 VERIFY_EXPR(SrcElem.HLSLSemantic != nullptr);
                 pLayoutElements[Elem].HLSLSemantic = MemPool.CopyString(SrcElem.HLSLSemantic);
             }
 
             // Correct description and compute offsets and tight strides
-            const auto Strides = ResolveInputLayoutAutoOffsetsAndStrides(pLayoutElements, InputLayout.NumElements);
-            BufferSlotsUsed    = static_cast<Uint8>(Strides.size());
+            const std::vector<Uint32> Strides = ResolveInputLayoutAutoOffsetsAndStrides(pLayoutElements, InputLayout.NumElements);
+            BufferSlotsUsed                   = static_cast<Uint8>(Strides.size());
 
             pStrides = MemPool.CopyConstructArray<Uint32>(Strides.data(), BufferSlotsUsed);
         }
         GraphicsPipeline.InputLayout.LayoutElements = pLayoutElements;
+
+#ifdef DILIGENT_DEVELOPMENT
+        this->m_pGraphicsPipelineData->dvpRenderTargetFormatsHash = ComputeRenderTargetFormatsHash(
+            GraphicsPipeline.NumRenderTargets, GraphicsPipeline.RTVFormats, GraphicsPipeline.DSVFormat);
+#endif
     }
 
     void InitializePipelineDesc(const ComputePipelineStateCreateInfo& CreateInfo,
@@ -1006,8 +1024,8 @@ protected:
     {
         size_t RTDataSize = sizeof(RayTracingPipelineData);
         // Allocate space for shader handles
-        const auto ShaderHandleSize = this->GetDevice()->GetAdapterInfo().RayTracing.ShaderGroupHandleSize;
-        const auto ShaderDataSize   = ShaderHandleSize * (CreateInfo.GeneralShaderCount + CreateInfo.TriangleHitShaderCount + CreateInfo.ProceduralHitShaderCount);
+        const Uint32 ShaderHandleSize = this->GetDevice()->GetAdapterInfo().RayTracing.ShaderGroupHandleSize;
+        const Uint32 ShaderDataSize   = ShaderHandleSize * (CreateInfo.GeneralShaderCount + CreateInfo.TriangleHitShaderCount + CreateInfo.ProceduralHitShaderCount);
         RTDataSize += ShaderDataSize;
         // Extra bytes were reserved to avoid compiler errors on zero-sized arrays
         RTDataSize -= sizeof(RayTracingPipelineData::ShaderHandles);
@@ -1093,12 +1111,12 @@ protected:
             if (pSignature == nullptr)
                 continue;
 
-            const auto ResIndex = pSignature->FindResource(Stage, Name);
+            const Uint32 ResIndex = pSignature->FindResource(Stage, Name);
             if (ResIndex != ResourceAttribution::InvalidResourceIndex)
                 return ResourceAttribution{pSignature, sign, ResIndex};
             else
             {
-                const auto ImtblSamIndex = pSignature->FindImmutableSampler(Stage, Name);
+                const Uint32 ImtblSamIndex = pSignature->FindImmutableSampler(Stage, Name);
                 if (ImtblSamIndex != ResourceAttribution::InvalidSamplerIndex)
                     return ResourceAttribution{pSignature, sign, ResourceAttribution::InvalidResourceIndex, ImtblSamIndex};
             }
@@ -1108,7 +1126,7 @@ protected:
 
     ResourceAttribution GetResourceAttribution(const char* Name, SHADER_TYPE Stage) const
     {
-        const auto* const pThis = static_cast<const PipelineStateImplType*>(this);
+        const PipelineStateImplType* const pThis = static_cast<const PipelineStateImplType*>(this);
         return GetResourceAttribution(Name, Stage, pThis->m_Signatures, pThis->m_SignatureCount);
     }
 
@@ -1131,7 +1149,7 @@ protected:
 
     static PSO_CREATE_INTERNAL_FLAGS GetInternalCreateFlags(const PipelineStateCreateInfo& CreateInfo)
     {
-        const auto* pInternalCI = static_cast<PSOCreateInternalInfo*>(CreateInfo.pInternalData);
+        const PSOCreateInternalInfo* pInternalCI = static_cast<PSOCreateInternalInfo*>(CreateInfo.pInternalData);
         return pInternalCI != nullptr ? pInternalCI->Flags : PSO_CREATE_INTERNAL_FLAG_NONE;
     }
 
@@ -1174,26 +1192,26 @@ private:
     {
         if (SrcLayout.Variables != nullptr)
         {
-            auto* const Variables = MemPool.ConstructArray<ShaderResourceVariableDesc>(SrcLayout.NumVariables);
-            DstLayout.Variables   = Variables;
+            ShaderResourceVariableDesc* const Variables = MemPool.ConstructArray<ShaderResourceVariableDesc>(SrcLayout.NumVariables);
+            DstLayout.Variables                         = Variables;
             for (Uint32 i = 0; i < SrcLayout.NumVariables; ++i)
             {
-                const auto& SrcVar = SrcLayout.Variables[i];
-                Variables[i]       = SrcVar;
-                Variables[i].Name  = MemPool.CopyString(SrcVar.Name);
+                const ShaderResourceVariableDesc& SrcVar{SrcLayout.Variables[i]};
+                Variables[i]      = SrcVar;
+                Variables[i].Name = MemPool.CopyString(SrcVar.Name);
             }
         }
 
         if (SrcLayout.ImmutableSamplers != nullptr)
         {
-            auto* const ImmutableSamplers = MemPool.ConstructArray<ImmutableSamplerDesc>(SrcLayout.NumImmutableSamplers);
-            DstLayout.ImmutableSamplers   = ImmutableSamplers;
+            ImmutableSamplerDesc* const ImmutableSamplers = MemPool.ConstructArray<ImmutableSamplerDesc>(SrcLayout.NumImmutableSamplers);
+            DstLayout.ImmutableSamplers                   = ImmutableSamplers;
             for (Uint32 i = 0; i < SrcLayout.NumImmutableSamplers; ++i)
             {
-                const auto& SrcSmplr = SrcLayout.ImmutableSamplers[i];
+                const ImmutableSamplerDesc& SrcSmplr = SrcLayout.ImmutableSamplers[i];
 #ifdef DILIGENT_DEVELOPMENT
                 {
-                    const auto& BorderColor = SrcSmplr.Desc.BorderColor;
+                    const Float32* BorderColor = SrcSmplr.Desc.BorderColor;
                     if (!((BorderColor[0] == 0 && BorderColor[1] == 0 && BorderColor[2] == 0 && BorderColor[3] == 0) ||
                           (BorderColor[0] == 0 && BorderColor[1] == 0 && BorderColor[2] == 0 && BorderColor[3] == 1) ||
                           (BorderColor[0] == 1 && BorderColor[1] == 1 && BorderColor[2] == 1 && BorderColor[3] == 1)))
@@ -1224,7 +1242,7 @@ private:
             Uint32 MaxSignatureBindingIndex = 0;
             for (Uint32 i = 0; i < CreateInfo.ResourceSignaturesCount; ++i)
             {
-                const auto* pSignature = ClassPtrCast<PipelineResourceSignatureImplType>(CreateInfo.ppResourceSignatures[i]);
+                const PipelineResourceSignatureImplType* pSignature = ClassPtrCast<PipelineResourceSignatureImplType>(CreateInfo.ppResourceSignatures[i]);
                 VERIFY(pSignature != nullptr, "Pipeline resource signature at index ", i, " is null. This error should've been caught by ValidatePipelineResourceSignatures.");
 
                 Uint32 Index = pSignature->GetDesc().BindingIndex;
@@ -1250,7 +1268,7 @@ private:
             VERIFY_EXPR(CreateInfo.ResourceSignaturesCount != 0 && CreateInfo.ppResourceSignatures != nullptr);
             for (Uint32 i = 0; i < CreateInfo.ResourceSignaturesCount; ++i)
             {
-                auto* pSignature = ClassPtrCast<PipelineResourceSignatureImplType>(CreateInfo.ppResourceSignatures[i]);
+                PipelineResourceSignatureImplType* pSignature = ClassPtrCast<PipelineResourceSignatureImplType>(CreateInfo.ppResourceSignatures[i]);
                 VERIFY_EXPR(pSignature != nullptr);
 
                 const Uint32 Index = pSignature->GetDesc().BindingIndex;
@@ -1265,7 +1283,7 @@ private:
 
                 for (Uint32 s = 0, StageCount = pSignature->GetNumActiveShaderStages(); s < StageCount; ++s)
                 {
-                    const auto ShaderType = pSignature->GetActiveShaderStageType(s);
+                    const SHADER_TYPE ShaderType = pSignature->GetActiveShaderStageType(s);
                     VERIFY(IsConsistentShaderType(ShaderType, CreateInfo.PSODesc.PipelineType),
                            "Pipeline resource signature '", pSignature->GetDesc().Name, "' at index ", Uint32{Index},
                            " has shader stage '", GetShaderTypeLiteralName(ShaderType), "' that is not compatible with pipeline type '",
@@ -1307,6 +1325,10 @@ protected:
 
         Uint32* pStrides        = nullptr;
         Uint8   BufferSlotsUsed = 0;
+
+#ifdef DILIGENT_DEVELOPMENT
+        size_t dvpRenderTargetFormatsHash = 0;
+#endif
     };
 
     struct RayTracingPipelineData

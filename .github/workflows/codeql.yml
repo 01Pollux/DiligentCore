@@ -18,10 +18,10 @@ jobs:
 
           - host_name:       "Linux"
             platform:        "Linux"
-            os:              "ubuntu-20.04"
+            os:              "ubuntu-24.04"
             cmake_generator: "Ninja"
-            cc:              "clang-12"
-            cxx:             "clang++-12"
+            cc:              "clang-18"
+            cxx:             "clang++-18"
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.host_name }} -> Code QL, ${{ matrix.toolset }}, ${{ matrix.build_type }}
@@ -41,14 +41,14 @@ jobs:
 
     - name: Set up build environment
       if: success()
-      uses: DiligentGraphics/github-action/setup-build-env@v1
+      uses: DiligentGraphics/github-action/setup-build-env@v3
       with:
         platform:        ${{ matrix.platform }}
         cmake-generator: ${{ matrix.cmake_generator }}
 
     - name: Configure CMake
       if: success()
-      uses: DiligentGraphics/github-action/configure-cmake@v1
+      uses: DiligentGraphics/github-action/configure-cmake@v3
       with:
         cc:         ${{ matrix.cc }}
         cxx:        ${{ matrix.cxx }}
@@ -65,7 +65,7 @@ jobs:
 
     - name: Build
       if: success()
-      uses: DiligentGraphics/github-action/build@v1
+      uses: DiligentGraphics/github-action/build@v3
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3

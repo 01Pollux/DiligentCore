@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.6)
+cmake_minimum_required (VERSION 3.10)
 
 project(Diligent-Archiver CXX)
 
@@ -148,7 +148,7 @@ if(GL_SUPPORTED OR GLES_SUPPORTED)
         target_link_libraries(Diligent-Archiver-static PRIVATE GLEW::glew OpenGL::GL)
     elseif(PLATFORM_ANDROID)
         target_link_libraries(Diligent-Archiver-static PRIVATE GLESv3 EGL)
-    elseif(PLATFORM_EMSCRIPTEN)
+    elseif(PLATFORM_WEB)
     else()
         message(FATAL_ERROR "Unsupported platform")
     endif()
@@ -167,8 +167,8 @@ endif()
 
 if(WEBGPU_SUPPORTED)
     target_link_libraries(Diligent-Archiver-static PRIVATE Diligent-GraphicsEngineWebGPU-static)
-    if (NOT PLATFORM_EMSCRIPTEN)
-        target_link_libraries(Diligent-Archiver-static PRIVATE webgpu_dawn)
+    if (NOT PLATFORM_WEB)
+        target_link_libraries(Diligent-Archiver-static PRIVATE dawn_native dawn_proc)
     endif()
     target_include_directories(Diligent-Archiver-static
     PRIVATE

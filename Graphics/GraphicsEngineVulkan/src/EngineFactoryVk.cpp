@@ -1,5 +1,5 @@
 /*
- *  Copyright 2019-2024 Diligent Graphics LLC
+ *  Copyright 2019-2025 Diligent Graphics LLC
  *  Copyright 2015-2019 Egor Yusov
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -44,6 +44,11 @@
 
 #if PLATFORM_ANDROID
 #    include "FileSystem.hpp"
+#endif
+
+#if DILIGENT_USE_OPENXR
+#    define XR_USE_GRAPHICS_API_VULKAN
+#    include <openxr/openxr_platform.h>
 #endif
 
 namespace Diligent
@@ -137,12 +142,15 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 {
     GraphicsAdapterInfo AdapterInfo;
 
-    const auto  vkVersion        = PhysicalDevice.GetVkVersion();
-    const auto& vkDeviceProps    = PhysicalDevice.GetProperties();
-    const auto& vkDeviceExtProps = PhysicalDevice.GetExtProperties();
-    const auto& vkFeatures       = PhysicalDevice.GetFeatures();
-    const auto& vkExtFeatures    = PhysicalDevice.GetExtFeatures();
-    const auto& vkDeviceLimits   = vkDeviceProps.limits;
+    using ExtensionProperties = VulkanUtilities::VulkanPhysicalDevice::ExtensionProperties;
+    using ExtensionFeatures   = VulkanUtilities::VulkanPhysicalDevice::ExtensionFeatures;
+
+    const uint32_t                    vkVersion        = PhysicalDevice.GetVkVersion();
+    const VkPhysicalDeviceProperties& vkDeviceProps    = PhysicalDevice.GetProperties();
+    const ExtensionProperties&        vkDeviceExtProps = PhysicalDevice.GetExtProperties();
+    const VkPhysicalDeviceFeatures&   vkFeatures       = PhysicalDevice.GetFeatures();
+    const ExtensionFeatures&          vkExtFeatures    = PhysicalDevice.GetExtFeatures();
+    const VkPhysicalDeviceLimits&     vkDeviceLimits   = vkDeviceProps.limits;
 
     // Set graphics adapter properties
     {
@@ -162,7 +170,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 
     // Buffer properties
     {
-        auto& BufferProps{AdapterInfo.Buffer};
+        BufferProperties& BufferProps{AdapterInfo.Buffer};
         BufferProps.ConstantBufferOffsetAlignment   = static_cast<Uint32>(vkDeviceLimits.minUniformBufferOffsetAlignment);
         BufferProps.StructuredBufferOffsetAlignment = static_cast<Uint32>(vkDeviceLimits.minStorageBufferOffsetAlignment);
         ASSERT_SIZEOF(BufferProps, 8, "Did you add a new member to BufferProperites? Please initialize it here.");
@@ -170,7 +178,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 
     // Texture properties
     {
-        auto& TexProps{AdapterInfo.Texture};
+        TextureProperties& TexProps{AdapterInfo.Texture};
         TexProps.MaxTexture1DDimension      = vkDeviceLimits.maxImageDimension1D;
         TexProps.MaxTexture1DArraySlices    = vkDeviceLimits.maxImageArrayLayers;
         TexProps.MaxTexture2DDimension      = vkDeviceLimits.maxImageDimension2D;
@@ -187,7 +195,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 
     // Sampler properties
     {
-        auto& SamProps{AdapterInfo.Sampler};
+        SamplerProperties& SamProps{AdapterInfo.Sampler};
         SamProps.BorderSamplingModeSupported = True;
         SamProps.MaxAnisotropy               = static_cast<Uint8>(vkDeviceLimits.maxSamplerAnisotropy);
         SamProps.LODBiasSupported            = True;
@@ -197,10 +205,10 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
     // Ray tracing properties
     if (AdapterInfo.Features.RayTracing)
     {
-        const auto& vkRTPipelineProps = vkDeviceExtProps.RayTracingPipeline;
-        const auto& vkASLimits        = vkDeviceExtProps.AccelStruct;
+        const VkPhysicalDeviceRayTracingPipelinePropertiesKHR&    vkRTPipelineProps = vkDeviceExtProps.RayTracingPipeline;
+        const VkPhysicalDeviceAccelerationStructurePropertiesKHR& vkASLimits        = vkDeviceExtProps.AccelStruct;
 
-        auto& RayTracingProps{AdapterInfo.RayTracing};
+        RayTracingProperties& RayTracingProps{AdapterInfo.RayTracing};
         RayTracingProps.MaxRecursionDepth        = vkRTPipelineProps.maxRayRecursionDepth;
         RayTracingProps.ShaderGroupHandleSize    = vkRTPipelineProps.shaderGroupHandleSize;
         RayTracingProps.MaxShaderRecordStride    = vkRTPipelineProps.maxShaderGroupStride;
@@ -228,8 +236,8 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
     // Wave op properties
     if (AdapterInfo.Features.WaveOp)
     {
-        const auto& vkWaveProps  = vkDeviceExtProps.Subgroup;
-        const auto  WaveOpStages = vkWaveProps.supportedStages;
+        const VkPhysicalDeviceSubgroupProperties& vkWaveProps  = vkDeviceExtProps.Subgroup;
+        const VkShaderStageFlags                  WaveOpStages = vkWaveProps.supportedStages;
 
         VkShaderStageFlags SupportedStages = WaveOpStages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT);
         if (vkFeatures.geometryShader != VK_FALSE)
@@ -240,7 +248,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
             SupportedStages |= WaveOpStages & (VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT);
         if (vkExtFeatures.RayTracingPipeline.rayTracingPipeline != VK_FALSE)
         {
-            constexpr auto VK_SHADER_STAGE_ALL_RAY_TRACING =
+            constexpr VkShaderStageFlags VK_SHADER_STAGE_ALL_RAY_TRACING =
                 VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                 VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
                 VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
@@ -250,7 +258,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
             SupportedStages |= WaveOpStages & VK_SHADER_STAGE_ALL_RAY_TRACING;
         }
 
-        auto& WaveOpProps{AdapterInfo.WaveOp};
+        WaveOpProperties& WaveOpProps{AdapterInfo.WaveOp};
         WaveOpProps.MinSize         = vkWaveProps.subgroupSize;
         WaveOpProps.MaxSize         = vkWaveProps.subgroupSize;
         WaveOpProps.SupportedStages = VkShaderStageFlagsToShaderTypes(SupportedStages);
@@ -261,7 +269,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
     // Mesh shader properties
     if (AdapterInfo.Features.MeshShaders)
     {
-        auto& MeshProps{AdapterInfo.MeshShader};
+        MeshShaderProperties& MeshProps{AdapterInfo.MeshShader};
         MeshProps.MaxThreadGroupCountX     = vkDeviceExtProps.MeshShader.maxMeshWorkGroupCount[0];
         MeshProps.MaxThreadGroupCountY     = vkDeviceExtProps.MeshShader.maxMeshWorkGroupCount[1];
         MeshProps.MaxThreadGroupCountZ     = vkDeviceExtProps.MeshShader.maxMeshWorkGroupCount[2];
@@ -271,7 +279,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 
     // Compute shader properties
     {
-        auto& CompProps{AdapterInfo.ComputeShader};
+        ComputeShaderProperties& CompProps{AdapterInfo.ComputeShader};
         CompProps.SharedMemorySize          = vkDeviceProps.limits.maxComputeSharedMemorySize;
         CompProps.MaxThreadGroupInvocations = vkDeviceProps.limits.maxComputeWorkGroupInvocations;
         CompProps.MaxThreadGroupSizeX       = vkDeviceProps.limits.maxComputeWorkGroupSize[0];
@@ -286,7 +294,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
     // Shading rate properties
     if (AdapterInfo.Features.VariableRateShading)
     {
-        auto& ShadingRateProps{AdapterInfo.ShadingRate};
+        ShadingRateProperties& ShadingRateProps{AdapterInfo.ShadingRate};
 
         // VK_KHR_fragment_shading_rate
         if (vkExtFeatures.ShadingRate.pipelineFragmentShadingRate != VK_FALSE ||
@@ -341,7 +349,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
                 VERIFY_EXPR(ShadingRateCount >= 3); // Spec says that implementation must support at least 3 predefined modes.
 
                 ShadingRates.resize(ShadingRateCount);
-                for (auto& SR : ShadingRates)
+                for (VkPhysicalDeviceFragmentShadingRateKHR& SR : ShadingRates)
                     SR.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR;
                 vkGetPhysicalDeviceFragmentShadingRatesKHR(PhysicalDevice.GetVkDeviceHandle(), &ShadingRateCount, ShadingRates.data());
             }
@@ -353,8 +361,8 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
             ShadingRateProps.NumShadingRates = StaticCast<Uint8>(std::min(ShadingRates.size(), size_t{MAX_SHADING_RATES}));
             for (Uint32 i = 0; i < ShadingRateProps.NumShadingRates; ++i)
             {
-                const auto& Src = ShadingRates[i];
-                auto&       Dst = ShadingRateProps.ShadingRates[i];
+                const VkPhysicalDeviceFragmentShadingRateKHR& Src = ShadingRates[i];
+                ShadingRateMode&                              Dst = ShadingRateProps.ShadingRates[i];
 
                 // maxFragmentShadingRateRasterizationSamples - contains only maximum bit
                 // sampleCounts - contains all supported bits
@@ -419,8 +427,8 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
             auto TestImageUsage = [&](VkImageUsageFlags Usage) {
                 VkImageFormatProperties ImgFmtProps{};
 
-                auto err = vkGetPhysicalDeviceImageFormatProperties(PhysicalDevice.GetVkDeviceHandle(), vkSRTexFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-                                                                    vkSRTexUsage | Usage, 0, &ImgFmtProps);
+                VkResult err = vkGetPhysicalDeviceImageFormatProperties(PhysicalDevice.GetVkDeviceHandle(), vkSRTexFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                                                                        vkSRTexUsage | Usage, 0, &ImgFmtProps);
                 return err == VK_SUCCESS;
             };
 
@@ -442,7 +450,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 
     // Draw command properties
     {
-        auto& DrawCommandProps{AdapterInfo.DrawCommand};
+        DrawCommandProperties& DrawCommandProps{AdapterInfo.DrawCommand};
         DrawCommandProps.MaxIndexValue        = vkDeviceProps.limits.maxDrawIndexedIndexValue;
         DrawCommandProps.MaxDrawIndirectCount = vkDeviceProps.limits.maxDrawIndirectCount;
         DrawCommandProps.CapFlags             = DRAW_COMMAND_CAP_FLAG_DRAW_INDIRECT | DRAW_COMMAND_CAP_FLAG_BASE_VERTEX;
@@ -461,8 +469,8 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
         // Same check as in VkFeaturesToDeviceFeatures()
         VERIFY_EXPR(vkFeatures.sparseBinding && (vkFeatures.sparseResidencyBuffer || vkFeatures.sparseResidencyImage2D));
 
-        const auto& SparseProps     = vkDeviceProps.sparseProperties;
-        auto&       SparseRes       = AdapterInfo.SparseResources;
+        const VkPhysicalDeviceSparseProperties& SparseProps{vkDeviceProps.sparseProperties};
+        SparseResourceProperties&               SparseRes{AdapterInfo.SparseResources};
         SparseRes.AddressSpaceSize  = vkDeviceLimits.sparseAddressSpaceSize;
         SparseRes.ResourceSpaceSize = vkDeviceLimits.sparseAddressSpaceSize; // no way to query
         SparseRes.StandardBlockSize = 64u << 10;                             // docs: "All currently defined standard sparse image block shapes are 64 KB in size."
@@ -506,7 +514,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 
     // Set memory properties
     {
-        auto& Mem{AdapterInfo.Memory};
+        AdapterMemoryInfo& Mem{AdapterInfo.Memory};
         Mem.LocalMemory         = 0;
         Mem.HostVisibleMemory   = 0;
         Mem.UnifiedMemory       = 0;
@@ -516,11 +524,11 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
         std::bitset<VK_MAX_MEMORY_HEAPS> HostVisibleHeap;
         std::bitset<VK_MAX_MEMORY_HEAPS> UnifiedHeap;
 
-        const auto& MemoryProps = PhysicalDevice.GetMemoryProperties();
+        const VkPhysicalDeviceMemoryProperties& MemoryProps = PhysicalDevice.GetMemoryProperties();
         for (uint32_t type = 0; type < MemoryProps.memoryTypeCount; ++type)
         {
-            const auto&    MemTypeInfo        = MemoryProps.memoryTypes[type];
-            constexpr auto UnifiedMemoryFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+            const VkMemoryType&             MemTypeInfo        = MemoryProps.memoryTypes[type];
+            constexpr VkMemoryPropertyFlags UnifiedMemoryFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 
             if (MemTypeInfo.propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
             {
@@ -553,7 +561,7 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 
         for (uint32_t heap = 0; heap < MemoryProps.memoryHeapCount; ++heap)
         {
-            const auto& HeapInfo = MemoryProps.memoryHeaps[heap];
+            const VkMemoryHeap& HeapInfo = MemoryProps.memoryHeaps[heap];
 
             if (UnifiedHeap[heap])
                 Mem.UnifiedMemory += static_cast<Uint64>(HeapInfo.size);
@@ -573,8 +581,8 @@ GraphicsAdapterInfo GetPhysicalDeviceGraphicsAdapterInfo(const VulkanUtilities::
 
         for (Uint32 q = 0; q < AdapterInfo.NumQueues; ++q)
         {
-            const auto& SrcQueue = QueueProperties[q];
-            auto&       DstQueue = AdapterInfo.Queues[q];
+            const VkQueueFamilyProperties& SrcQueue = QueueProperties[q];
+            CommandQueueInfo&              DstQueue = AdapterInfo.Queues[q];
 
             DstQueue.QueueType                 = VkQueueFlagsToCmdQueueType(SrcQueue.queueFlags);
             DstQueue.MaxDeviceContexts         = SrcQueue.queueCount;
@@ -604,7 +612,7 @@ void EngineFactoryVkImpl::EnumerateAdapters(Version              MinVersion,
     InstanceCI.ApiVersion             = VK_MAKE_VERSION(0xFF, 0xFF, 0);
     InstanceCI.EnableDeviceSimulation = m_EnableDeviceSimulation;
 
-    auto Instance = VulkanUtilities::VulkanInstance::Create(InstanceCI);
+    std::shared_ptr<VulkanUtilities::VulkanInstance> Instance = VulkanUtilities::VulkanInstance::Create(InstanceCI);
 
     if (Adapters == nullptr)
     {
@@ -615,10 +623,48 @@ void EngineFactoryVkImpl::EnumerateAdapters(Version              MinVersion,
     NumAdapters = std::min(NumAdapters, static_cast<Uint32>(Instance->GetVkPhysicalDevices().size()));
     for (Uint32 i = 0; i < NumAdapters; ++i)
     {
-        auto PhysicalDevice = VulkanUtilities::VulkanPhysicalDevice::Create({*Instance, Instance->GetVkPhysicalDevices()[i]});
-        Adapters[i]         = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
+        std::unique_ptr<VulkanUtilities::VulkanPhysicalDevice> PhysicalDevice =
+            VulkanUtilities::VulkanPhysicalDevice::Create({*Instance, Instance->GetVkPhysicalDevices()[i]});
+        Adapters[i] = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
     }
 }
+
+#if DILIGENT_USE_OPENXR
+VkResult CreateVulkanDeviceForOpenXR(const OpenXRAttribs&         XRAttribs,
+                                     VkPhysicalDevice             PhysicalDevice,
+                                     const VkDeviceCreateInfo*    pCreateInfo,
+                                     const VkAllocationCallbacks* pAllocator,
+                                     VkDevice*                    pDevice) noexcept(false)
+{
+    XrInstance xrInstance = XR_NULL_HANDLE;
+    static_assert(sizeof(XrInstance) == sizeof(XRAttribs.Instance), "XrInstance size mismatch");
+    memcpy(&xrInstance, &XRAttribs.Instance, sizeof(XrInstance));
+
+    PFN_xrGetInstanceProcAddr   xrGetInstanceProcAddr   = reinterpret_cast<PFN_xrGetInstanceProcAddr>(XRAttribs.GetInstanceProcAddr);
+    PFN_xrCreateVulkanDeviceKHR xrCreateVulkanDeviceKHR = nullptr;
+    if (XR_FAILED(xrGetInstanceProcAddr(xrInstance, "xrCreateVulkanDeviceKHR", reinterpret_cast<PFN_xrVoidFunction*>(&xrCreateVulkanDeviceKHR))))
+    {
+        LOG_ERROR_AND_THROW("Failed to get xrCreateVulkanDeviceKHR function");
+    }
+    VERIFY_EXPR(xrCreateVulkanDeviceKHR != nullptr);
+
+    XrVulkanDeviceCreateInfoKHR VulkanDeviceCI{XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR};
+    static_assert(sizeof(VulkanDeviceCI.systemId) == sizeof(XRAttribs.SystemId), "systemId size mismatch");
+    memcpy(&VulkanDeviceCI.systemId, &XRAttribs.SystemId, sizeof(VulkanDeviceCI.systemId));
+    VulkanDeviceCI.createFlags            = 0;
+    VulkanDeviceCI.pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
+    VulkanDeviceCI.vulkanPhysicalDevice   = PhysicalDevice;
+    VulkanDeviceCI.vulkanCreateInfo       = pCreateInfo;
+    VulkanDeviceCI.vulkanAllocator        = pAllocator;
+
+    VkResult vkRes = VK_ERROR_UNKNOWN;
+    if (XR_FAILED(xrCreateVulkanDeviceKHR(xrInstance, &VulkanDeviceCI, pDevice, &vkRes)))
+    {
+        LOG_ERROR_AND_THROW("Failed to create Vulkan device for OpenXR");
+    }
+    return vkRes;
+}
+#endif
 
 void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& EngineCI,
                                                     IRenderDevice**           ppDevice,
@@ -647,7 +693,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
 
     try
     {
-        const auto GraphicsAPIVersion = EngineCI.GraphicsAPIVersion == Version{0, 0} ?
+        const Version GraphicsAPIVersion = EngineCI.GraphicsAPIVersion == Version{0, 0} ?
             Version{0xFF, 0xFF} : // Instance will use the maximum available version
             EngineCI.GraphicsAPIVersion;
 
@@ -664,10 +710,35 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
         InstanceCI.IgnoreDebugMessageCount   = EngineCI.IgnoreDebugMessageCount;
         InstanceCI.ppIgnoreDebugMessageNames = EngineCI.ppIgnoreDebugMessageNames;
 
-        auto Instance = VulkanUtilities::VulkanInstance::Create(InstanceCI);
+#if DILIGENT_USE_OPENXR
+        if (EngineCI.pXRAttribs != nullptr && EngineCI.pXRAttribs->Instance != 0)
+        {
+            InstanceCI.XR.Instance            = EngineCI.pXRAttribs->Instance;
+            InstanceCI.XR.SystemId            = EngineCI.pXRAttribs->SystemId;
+            InstanceCI.XR.GetInstanceProcAddr = EngineCI.pXRAttribs->GetInstanceProcAddr;
+        }
+#endif
 
-        auto vkDevice       = Instance->SelectPhysicalDevice(EngineCI.AdapterId);
-        auto PhysicalDevice = VulkanUtilities::VulkanPhysicalDevice::Create({*Instance, vkDevice, /*LogExtensions = */ true});
+        std::shared_ptr<VulkanUtilities::VulkanInstance> Instance = VulkanUtilities::VulkanInstance::Create(InstanceCI);
+
+        VkPhysicalDevice vkPhysDevice = VK_NULL_HANDLE;
+#if DILIGENT_USE_OPENXR
+        if (InstanceCI.XR.Instance != 0)
+        {
+            if (EngineCI.AdapterId != DEFAULT_ADAPTER_ID)
+            {
+                LOG_WARNING_MESSAGE("AdapterId is ignored when OpenXR is used as the physical device is selected by OpenXR runtime");
+            }
+            vkPhysDevice = Instance->SelectPhysicalDeviceForOpenXR(InstanceCI.XR);
+        }
+        else
+#endif
+        {
+            vkPhysDevice = Instance->SelectPhysicalDevice(EngineCI.AdapterId);
+        }
+
+        std::unique_ptr<VulkanUtilities::VulkanPhysicalDevice> PhysicalDevice =
+            VulkanUtilities::VulkanPhysicalDevice::Create({*Instance, vkPhysDevice, /*LogExtensions = */ true});
 
         std::vector<const char*> DeviceExtensions;
         if (Instance->IsExtensionEnabled(VK_KHR_SURFACE_EXTENSION_NAME))
@@ -679,9 +750,11 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             LOG_WARNING_MESSAGE(VK_KHR_MAINTENANCE1_EXTENSION_NAME, " is not supported.");
 
         // Enable device features if they are supported and throw an error if not supported, but required by user.
-        const auto AdapterInfo = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
+        const GraphicsAdapterInfo AdapterInfo = GetPhysicalDeviceGraphicsAdapterInfo(*PhysicalDevice);
         VerifyEngineCreateInfo(EngineCI, AdapterInfo);
-        const auto EnabledFeatures = EnableDeviceFeatures(AdapterInfo.Features, EngineCI.Features);
+        const DeviceFeatures   EnabledFeatures   = EnableDeviceFeatures(AdapterInfo.Features, EngineCI.Features);
+        const DeviceFeaturesVk AdapterFeaturesVk = PhysicalDeviceFeaturesToDeviceFeaturesVk(PhysicalDevice->GetExtFeatures(), DEVICE_FEATURE_STATE_OPTIONAL);
+        const DeviceFeaturesVk EnabledFeaturesVk = EnableDeviceFeaturesVk(AdapterFeaturesVk, EngineCI.FeaturesVk);
 
         std::vector<VkDeviceQueueGlobalPriorityCreateInfoEXT> QueueGlobalPriority;
         std::vector<VkDeviceQueueCreateInfo>                  QueueInfos;
@@ -701,11 +774,11 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
 
             for (Uint32 CtxInd = 0; CtxInd < EngineCI.NumImmediateContexts; ++CtxInd)
             {
-                const auto& ContextInfo = EngineCI.pImmediateContextInfo[CtxInd];
+                const ImmediateContextCreateInfo& ContextInfo = EngineCI.pImmediateContextInfo[CtxInd];
                 VERIFY(ContextInfo.QueueId < QueueProperties.size() && ContextInfo.QueueId < QueueIDtoQueueInfo.size(),
                        "Must have been verified in VerifyEngineCreateInfo()");
 
-                auto& QueueIndex = QueueIDtoQueueInfo[ContextInfo.QueueId];
+                Uint8& QueueIndex = QueueIDtoQueueInfo[ContextInfo.QueueId];
                 if (QueueIndex == DEFAULT_QUEUE_ID)
                 {
                     QueueIndex = static_cast<Uint8>(QueueInfos.size());
@@ -721,7 +794,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
                 }
                 QueueInfos[QueueIndex].queueCount += 1;
 
-                auto& Priority = QueueIDtoPriority[QueueIndex];
+                QUEUE_PRIORITY& Priority = QueueIDtoPriority[QueueIndex];
                 if (Priority != QUEUE_PRIORITY_UNKNOWN && Priority != ContextInfo.Priority)
                     LOG_ERROR_AND_THROW("Context priority for all contexts with QueueId must be the same");
                 Priority = ContextInfo.Priority;
@@ -733,7 +806,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
                 QueueGlobalPriority.resize(QueueInfos.size());
                 for (Uint32 QInd = 0; QInd < QueueInfos.size(); ++QInd)
                 {
-                    auto& QPriority          = QueueGlobalPriority[QInd];
+                    VkDeviceQueueGlobalPriorityCreateInfoEXT& QPriority{QueueGlobalPriority[QInd]};
                     QPriority.sType          = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_EXT;
                     QPriority.pNext          = nullptr;
                     QPriority.globalPriority = QueuePriorityToVkQueueGlobalPriority(QueueIDtoPriority[QInd]);
@@ -746,7 +819,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             QueueInfos.resize(1);
             QueuePriorities.resize(1);
 
-            auto& QueueCI         = QueueInfos[0];
+            VkDeviceQueueCreateInfo& QueueCI{QueueInfos[0]};
             QueuePriorities[0]    = 1.0f; // Ask for the highest priority for our queue. (range [0,1])
             QueueIDtoQueueInfo[0] = 0;
 
@@ -770,15 +843,15 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
         vkDeviceCreateInfo.queueCreateInfoCount = static_cast<Uint32>(QueueInfos.size());
         vkDeviceCreateInfo.pQueueCreateInfos    = QueueInfos.data();
 
-        const auto&              vkDeviceFeatures = PhysicalDevice->GetFeatures();
-        VkPhysicalDeviceFeatures vkEnabledFeatures{};
+        const VkPhysicalDeviceFeatures& vkDeviceFeatures{PhysicalDevice->GetFeatures()};
+        VkPhysicalDeviceFeatures        vkEnabledFeatures{};
         vkDeviceCreateInfo.pEnabledFeatures = &vkEnabledFeatures;
 
 #define ENABLE_VKFEATURE(vkFeature, State) \
     vkEnabledFeatures.vkFeature = (State == DEVICE_FEATURE_STATE_ENABLED ? VK_TRUE : VK_FALSE);
 
-        auto ImageCubeArrayFeature    = DEVICE_FEATURE_STATE_OPTIONAL;
-        auto SamplerAnisotropyFeature = DEVICE_FEATURE_STATE_OPTIONAL;
+        DEVICE_FEATURE_STATE ImageCubeArrayFeature    = DEVICE_FEATURE_STATE_OPTIONAL;
+        DEVICE_FEATURE_STATE SamplerAnisotropyFeature = DEVICE_FEATURE_STATE_OPTIONAL;
         // clang-format off
         ENABLE_VKFEATURE(geometryShader,                    EnabledFeatures.GeometryShaders);
         ENABLE_VKFEATURE(tessellationShader,                EnabledFeatures.Tessellation);
@@ -844,7 +917,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
             {
                 EnabledExtFeats.MeshShader = DeviceExtFeatures.MeshShader;
                 VERIFY_EXPR(EnabledExtFeats.MeshShader.taskShader != VK_FALSE && EnabledExtFeats.MeshShader.meshShader != VK_FALSE);
-                const auto* MeshShaderExtensionName = VK_EXT_MESH_SHADER_EXTENSION_NAME;
+                const char* MeshShaderExtensionName = VK_EXT_MESH_SHADER_EXTENSION_NAME;
                 VERIFY(PhysicalDevice->IsExtensionSupported(MeshShaderExtensionName),
                        MeshShaderExtensionName,
                        " extension must be supported as it has already been checked by VulkanPhysicalDevice and "
@@ -1162,6 +1235,35 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
                 NextExt  = &EnabledExtFeats.ShaderDrawParameters.pNext;
             }
 
+            if (EnabledFeaturesVk.DynamicRendering)
+            {
+                VERIFY_EXPR(PhysicalDevice->IsExtensionSupported(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME));
+                DeviceExtensions.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+
+                EnabledExtFeats.DynamicRendering = DeviceExtFeatures.DynamicRendering;
+
+                *NextExt = &EnabledExtFeats.DynamicRendering;
+                NextExt  = &EnabledExtFeats.DynamicRendering.pNext;
+            }
+
+            if (EnabledFeaturesVk.HostImageCopy)
+            {
+                VERIFY_EXPR(PhysicalDevice->IsExtensionSupported(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME));
+                DeviceExtensions.push_back(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
+
+                const uint32_t vkDeviceVersion = PhysicalDevice->GetVkVersion();
+                if (Version{VK_VERSION_MAJOR(vkDeviceVersion), VK_VERSION_MINOR(vkDeviceVersion)} < Version{1, 3})
+                {
+                    DeviceExtensions.push_back(VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME);
+                    DeviceExtensions.push_back(VK_KHR_FORMAT_FEATURE_FLAGS_2_EXTENSION_NAME);
+                }
+
+                EnabledExtFeats.HostImageCopy = DeviceExtFeatures.HostImageCopy;
+
+                *NextExt = &EnabledExtFeats.HostImageCopy;
+                NextExt  = &EnabledExtFeats.HostImageCopy.pNext;
+            }
+
             // Append user-defined features
             *NextExt = EngineCI.pDeviceExtensionFeatures;
         }
@@ -1183,7 +1285,7 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
 
             // Remove duplicate extensions
             bool Exists = false;
-            for (auto* ExtName : DeviceExtensions)
+            for (const char* ExtName : DeviceExtensions)
             {
                 if (std::strcmp(ExtName, EngineCI.ppDeviceExtensionNames[i]) == 0)
                 {
@@ -1199,10 +1301,30 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
         vkDeviceCreateInfo.ppEnabledExtensionNames = DeviceExtensions.empty() ? nullptr : DeviceExtensions.data();
         vkDeviceCreateInfo.enabledExtensionCount   = static_cast<uint32_t>(DeviceExtensions.size());
 
-        auto vkAllocator   = Instance->GetVkAllocator();
-        auto LogicalDevice = VulkanUtilities::VulkanLogicalDevice::Create(*PhysicalDevice, vkDeviceCreateInfo, EnabledExtFeats, vkAllocator);
+        VkAllocationCallbacks* vkAllocator = Instance->GetVkAllocator();
+        VkDevice               vkDevice    = VK_NULL_HANDLE;
+        VkResult               vkRes       = VK_ERROR_UNKNOWN;
+#if DILIGENT_USE_OPENXR
+        if (InstanceCI.XR.Instance != 0)
+        {
+            vkRes = CreateVulkanDeviceForOpenXR(*EngineCI.pXRAttribs, PhysicalDevice->GetVkDeviceHandle(), &vkDeviceCreateInfo, vkAllocator, &vkDevice);
+        }
+        else
+#endif
+        {
+            vkRes = vkCreateDevice(PhysicalDevice->GetVkDeviceHandle(), &vkDeviceCreateInfo, vkAllocator, &vkDevice);
+        }
+        CHECK_VK_ERROR_AND_THROW(vkRes, "Failed to create logical device");
 
-        auto& RawMemAllocator = GetRawAllocator();
+        std::shared_ptr<VulkanUtilities::VulkanLogicalDevice> LogicalDevice = VulkanUtilities::VulkanLogicalDevice::Create({
+            *PhysicalDevice,
+            vkDevice,
+            *vkDeviceCreateInfo.pEnabledFeatures,
+            EnabledExtFeats,
+            vkAllocator,
+        });
+
+        IMemoryAllocator& RawMemAllocator = GetRawAllocator();
 
         std::vector<RefCntAutoPtr<CommandQueueVkImpl>> CommandQueuesVk{std::max(1u, EngineCI.NumImmediateContexts)};
         std::vector<ICommandQueueVk*>                  CommandQueues{CommandQueuesVk.size()};
@@ -1214,10 +1336,10 @@ void EngineFactoryVkImpl::CreateDeviceAndContextsVk(const EngineVkCreateInfo& En
 
             for (Uint32 CtxInd = 0; CtxInd < CommandQueuesVk.size(); ++CtxInd)
             {
-                const auto& ContextInfo = EngineCI.pImmediateContextInfo[CtxInd];
-                const auto  QueueIndex  = QueueIDtoQueueInfo[ContextInfo.QueueId];
+                const ImmediateContextCreateInfo& ContextInfo = EngineCI.pImmediateContextInfo[CtxInd];
+                const Uint8                       QueueIndex  = QueueIDtoQueueInfo[ContextInfo.QueueId];
                 VERIFY_EXPR(QueueIndex != DEFAULT_QUEUE_ID);
-                auto& QueueCI = QueueInfos[QueueIndex];
+                VkDeviceQueueCreateInfo& QueueCI = QueueInfos[QueueIndex];
 
                 CommandQueuesVk[CtxInd] = NEW_RC_OBJ(RawMemAllocator, "CommandQueueVk instance", CommandQueueVkImpl)(LogicalDevice, SoftwareQueueIndex{CtxInd}, EngineCI.NumImmediateContexts, QueueCI.queueCount, ContextInfo);
                 CommandQueues[CtxInd]   = CommandQueuesVk[CtxInd];
@@ -1281,8 +1403,8 @@ void EngineFactoryVkImpl::AttachToVulkanDevice(std::shared_ptr<VulkanUtilities::
 
     ImmediateContextCreateInfo DefaultImmediateCtxCI;
 
-    const auto        NumImmediateContexts  = EngineCI.NumImmediateContexts > 0 ? EngineCI.NumImmediateContexts : 1;
-    const auto* const pImmediateContextInfo = EngineCI.NumImmediateContexts > 0 ? EngineCI.pImmediateContextInfo : &DefaultImmediateCtxCI;
+    const Uint32                            NumImmediateContexts  = EngineCI.NumImmediateContexts > 0 ? EngineCI.NumImmediateContexts : 1;
+    const ImmediateContextCreateInfo* const pImmediateContextInfo = EngineCI.NumImmediateContexts > 0 ? EngineCI.pImmediateContextInfo : &DefaultImmediateCtxCI;
 
     VERIFY_EXPR(NumImmediateContexts == CommandQueueCount);
 
@@ -1291,7 +1413,7 @@ void EngineFactoryVkImpl::AttachToVulkanDevice(std::shared_ptr<VulkanUtilities::
 
     try
     {
-        auto& RawMemAllocator = GetRawAllocator();
+        IMemoryAllocator& RawMemAllocator = GetRawAllocator();
 
         RenderDeviceVkImpl* pRenderDeviceVk{
             NEW_RC_OBJ(RawMemAllocator, "RenderDeviceVkImpl instance", RenderDeviceVkImpl)(
@@ -1302,18 +1424,15 @@ void EngineFactoryVkImpl::AttachToVulkanDevice(std::shared_ptr<VulkanUtilities::
         if (m_OnRenderDeviceCreated != nullptr)
             m_OnRenderDeviceCreated(pRenderDeviceVk);
 
-
-
         for (Uint32 CtxInd = 0; CtxInd < NumImmediateContexts; ++CtxInd)
         {
-            const auto  QueueId    = ppCommandQueues[CtxInd]->GetQueueFamilyIndex();
-            const auto& QueueProps = pRenderDeviceVk->GetPhysicalDevice().GetQueueProperties();
-            const auto  QueueType  = VkQueueFlagsToCmdQueueType(QueueProps[QueueId].queueFlags);
+            const uint32_t           QueueId    = ppCommandQueues[CtxInd]->GetQueueFamilyIndex();
+            const auto&              QueueProps = pRenderDeviceVk->GetPhysicalDevice().GetQueueProperties();
+            const COMMAND_QUEUE_TYPE QueueType  = VkQueueFlagsToCmdQueueType(QueueProps[QueueId].queueFlags);
 
             RefCntAutoPtr<DeviceContextVkImpl> pImmediateCtxVk{
                 NEW_RC_OBJ(RawMemAllocator, "DeviceContextVkImpl instance", DeviceContextVkImpl)(
                     pRenderDeviceVk,
-                    EngineCI,
                     DeviceContextDesc{
                         pImmediateContextInfo[CtxInd].Name,
                         QueueType,
@@ -1329,21 +1448,7 @@ void EngineFactoryVkImpl::AttachToVulkanDevice(std::shared_ptr<VulkanUtilities::
 
         for (Uint32 DeferredCtx = 0; DeferredCtx < EngineCI.NumDeferredContexts; ++DeferredCtx)
         {
-            RefCntAutoPtr<DeviceContextVkImpl> pDeferredCtxVk{
-                NEW_RC_OBJ(RawMemAllocator, "DeviceContextVkImpl instance", DeviceContextVkImpl)(
-                    pRenderDeviceVk,
-                    EngineCI,
-                    DeviceContextDesc{
-                        nullptr,
-                        COMMAND_QUEUE_TYPE_UNKNOWN,
-                        true,                              // IsDeferred
-                        NumImmediateContexts + DeferredCtx // Context id
-                    }                                      //
-                    )};
-            // We must call AddRef() (implicitly through QueryInterface()) because pRenderDeviceVk will
-            // keep a weak reference to the context
-            pDeferredCtxVk->QueryInterface(IID_DeviceContext, reinterpret_cast<IObject**>(ppContexts + NumImmediateContexts + DeferredCtx));
-            pRenderDeviceVk->SetDeferredContext(DeferredCtx, pDeferredCtxVk);
+            pRenderDeviceVk->CreateDeferredContext(ppContexts + NumImmediateContexts + DeferredCtx);
         }
     }
     catch (const std::runtime_error&)
@@ -1381,11 +1486,11 @@ void EngineFactoryVkImpl::CreateSwapChainVk(IRenderDevice*       pDevice,
 
     try
     {
-        auto* pDeviceVk        = ClassPtrCast<RenderDeviceVkImpl>(pDevice);
-        auto* pDeviceContextVk = ClassPtrCast<DeviceContextVkImpl>(pImmediateContext);
-        auto& RawMemAllocator  = GetRawAllocator();
+        RenderDeviceVkImpl*  pDeviceVk        = ClassPtrCast<RenderDeviceVkImpl>(pDevice);
+        DeviceContextVkImpl* pDeviceContextVk = ClassPtrCast<DeviceContextVkImpl>(pImmediateContext);
+        IMemoryAllocator&    RawMemAllocator  = GetRawAllocator();
 
-        auto* pSwapChainVk = NEW_RC_OBJ(RawMemAllocator, "SwapChainVkImpl instance", SwapChainVkImpl)(SCDesc, pDeviceVk, pDeviceContextVk, Window);
+        SwapChainVkImpl* pSwapChainVk = NEW_RC_OBJ(RawMemAllocator, "SwapChainVkImpl instance", SwapChainVkImpl)(SCDesc, pDeviceVk, pDeviceContextVk, Window);
         pSwapChainVk->QueryInterface(IID_SwapChain, reinterpret_cast<IObject**>(ppSwapChain));
     }
     catch (const std::runtime_error&)
